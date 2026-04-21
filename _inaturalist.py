@@ -109,7 +109,8 @@ numberOfPrivateObservations = 0
 numberOfPrivateObservationsWoGeo = 0
 
 for dataFile in familyFiles:
-    dataFileName = dataFile + ".csv"
+    if skip_parsing: break
+    dataFileName = "Observations/" + dataFile + ".csv"
     if os.path.isfile(dataFileName):
         with open(dataFileName, 'r', encoding='utf-8') as csvfile:
             # id, -> Unique identifier for the observation
@@ -717,7 +718,7 @@ if createDataExportForVisTool:
 ############################################
 if createGeneralVisualizations:
     print ("\nGenerating visualization")
-    os.makedirs(pathOfTheScript + os.sep + "vis", exist_ok=True)
+    os.makedirs(pathOfTheScript + "vis", exist_ok=True)
 
     # find information about people and their postings
     print ("Collecting information about people's posts counts (incl. sorting, may take a bit)")
@@ -1194,13 +1195,13 @@ if createGeneralVisualizations:
     )
     # this part failed with a 522 timeout in orca, but works with the new python/plotly
     annotations = []
-    for i in range(0, len(peopleAndPictureCountSortedValues)):
+    '''for i in range(0, len(peopleAndPictureCountSortedValues)):
         annotations.append(dict(
             xref='x', yref='y', y = i, x = peopleAndPictureCountSortedValues[i] + 2, xanchor = 'left', yanchor = 'middle',
             text = str(peopleAndPictureCountSortedValues[i]),
             font = dict(color='#2a3f5f', size=1.0),
             showarrow=False
-        ))
+        ))'''
     layout['annotations'] = annotations
     fig = go.Figure(data=data, layout=layout)
     pio.write_image(fig, 'vis' + os.sep + '0_iNaturalist-people-post-count-rank.pdf')
@@ -1215,6 +1216,7 @@ if createPersonVisualizationExcerpts:
         for person in peopleExcerptPlots:
             rankCounter += 1
             personLabel = person
+            personID = person
             personMissedImages = 0
             outfile.write('============================\n')
             outfile.write(person)
@@ -1240,6 +1242,7 @@ if createPersonVisualizationExcerpts:
                     # also filter out dates from before 1950 (found some on 1900/01/01 and, e.g., 1939/06/04)
                     if (cpLocation['observed_on'] != "") and (int(cpLocation['observed_on'].split('-')[0]) > 1950):
                         locationTag = ""
+                        # filter out obscured coordinates
                         if (cpLocation['coordinates_obscured'] == "true"):
                             locationTag = "iN-o" + str(cpLocation['id'])
                             counterObservationsObscured += 1
@@ -1277,12 +1280,14 @@ if createPersonVisualizationExcerpts:
             additionalHorizontalOffset = 0.0
             shapeList = []
             firstNonObscuredAlreadyPlaced = False
+            anchorObscured = False
             numberOfObscuredObservations = 0
             obscuredObservationsTimeUnavailable = []
             markerSize = 8.0
             print(personLabel + ", active from " + pictureListOfPersonWithDetails[0][3] + " to " + pictureListOfPersonWithDetails[-1][3], end='')
             outfile.write(", active from " + pictureListOfPersonWithDetails[0][3] + " to " + pictureListOfPersonWithDetails[-1][3] + "\n")
             outfile.write('============================\n')
+            # For each picture posted by a single person
             for locationTag, latitude, longitude, date, time, coordinates_obscured in pictureListOfPersonWithDetails:
                 dateTimeStr = date.replace("/", "-") + " " + time
                 dateTimeObj = datetime.datetime.strptime(dateTimeStr, '%Y-%m-%d %H:%M:%S')
@@ -1292,8 +1297,11 @@ if createPersonVisualizationExcerpts:
                 if (prevDate != date): # we start a new day
                     # before starting the new line for the new day, place all potentially unplaced markers
                     if (numberOfObscuredObservations > 0):
-                        distance = great_circle((finalLatitude, finalLongitude), (prevLatitude, prevLongitude)).meters
-                        additionalHorizontalOffset = math.log(distance+1.0, 2) / float(numberOfObscuredObservations)
+                        if anchorObscured:
+                            additionalHorizontalOffset = markerSize
+                        else:
+                            distance = great_circle((finalLatitude, finalLongitude), (prevLatitude, prevLongitude)).meters
+                            additionalHorizontalOffset = math.log(distance+1.0, 2) / float(numberOfObscuredObservations)
                         for i in range(0, numberOfObscuredObservations):
                             horizontalOffset += additionalHorizontalOffset
                             # place the obscured marker
@@ -1348,14 +1356,20 @@ if createPersonVisualizationExcerpts:
                     prevLongitude = longitude
                     outfile.write(locationTag + ", " + str(latitude) + ", " + str(longitude) + ", " + date + ", " + time + ", first entry of the day\n")
                     prevDateTimeObj = dateTimeObj
+                    anchorObscured = (coordinates_obscured == "true")
                 else: # this is still the old day
                     if (coordinates_obscured == "false"): # we have a true data point
                         # we append an element to an existing line by placing shapes that we anchor in data space
                         # but that we layout in pixel space; each box is 5 by 5 pixels large
                         elapsedSeconds = (dateTimeObj - prevDateTimeObj).total_seconds()
-                        distance = great_circle((latitude, longitude), (prevLatitude, prevLongitude)).meters
-                        if (elapsedSeconds > 0.0): speed = distance * 3.6 / float(elapsedSeconds)
-                        additionalHorizontalOffset = math.log(distance+1.0, 2)
+                        if anchorObscured:
+                            distance = -1.0
+                            speed = -1.0
+                            additionalHorizontalOffset = markerSize * 0.5
+                        else:
+                            distance = great_circle((latitude, longitude), (prevLatitude, prevLongitude)).meters
+                            if (elapsedSeconds > 0.0): speed = distance * 3.6 / float(elapsedSeconds)
+                            additionalHorizontalOffset = math.log(distance+1.0, 2)
 
                         if (not firstNonObscuredAlreadyPlaced): # if we are the first unobscured marker in a day, use gray
                             firstNonObscuredAlreadyPlaced = True
@@ -1450,7 +1464,11 @@ if createPersonVisualizationExcerpts:
                         prevLatitude = latitude
                         prevLongitude = longitude
                         prevDateTimeObj = dateTimeObj
-                        outfile.write(locationTag + ", " + str(latitude) + ", " + str(longitude) + ", " + date + ", " + time + ", " + str(elapsedSeconds) + "s, " + str(round(distance, 1)) + "m, " + str(round(speed, 1)) + "km/h\n")
+                        if anchorObscured:
+                            outfile.write(locationTag + ", " + str(latitude) + ", " + str(longitude) + ", " + date + ", " + time + ", " + str(elapsedSeconds) + "s, N/A, N/A\n")
+                            anchorObscured = False
+                        else:
+                            outfile.write(locationTag + ", " + str(latitude) + ", " + str(longitude) + ", " + date + ", " + time + ", " + str(elapsedSeconds) + "s, " + str(round(distance, 1)) + "m, " + str(round(speed, 1)) + "km/h\n")
                         # we placed a real marker, so the obscured marker count is again 0
                         numberOfObscuredObservations = 0
                         obscuredObservationsTimeUnavailable = []
@@ -1468,8 +1486,11 @@ if createPersonVisualizationExcerpts:
 
             # place all remaining potentially unplaced markers from the last day
             if (numberOfObscuredObservations > 0):
-                distance = great_circle((finalLatitude, finalLongitude), (prevLatitude, prevLongitude)).meters
-                additionalHorizontalOffset = math.log(distance+1.0, 2) / float(numberOfObscuredObservations)
+                if anchorObscured:
+                    additionalHorizontalOffset = markerSize
+                else:
+                    distance = great_circle((finalLatitude, finalLongitude), (prevLatitude, prevLongitude)).meters
+                    additionalHorizontalOffset = math.log(distance+1.0, 2) / float(numberOfObscuredObservations)
                 for i in range(0, numberOfObscuredObservations):
                     horizontalOffset += additionalHorizontalOffset
                     # place the obscured marker
@@ -1544,7 +1565,7 @@ if createPersonVisualizationExcerpts:
             layout['shapes'] = shapeList
 
             fig = go.Figure(data=data, layout=layout)
-            pio.write_image(fig, 'vis' + os.sep + '0_people-moves-iNaturalist_' + str(rankCounter).zfill(2) + "_" + personLabel.replace('@', '_') + '.pdf')
+            pio.write_image(fig, 'vis' + os.sep + '0_people-moves-iNaturalist_' + personID + '.pdf')
 
             if createPersonVisualizationExcerptsWide:
                 # wide layout for the visualization, make it take less vertical space
@@ -1578,7 +1599,7 @@ if createPersonVisualizationExcerpts:
                 layout['shapes'] = shapeList
 
                 fig = go.Figure(data=data, layout=layout)
-                pio.write_image(fig, 'vis' + os.sep + '0_people-moves-iNaturalist_' + str(rankCounter).zfill(2) + "_" + personLabel.replace('@', '_') + '-wide.pdf')
+                pio.write_image(fig, 'vis' + os.sep + '0_people-moves-iNaturalist_' + personID + '-wide.pdf')
 
             if createPersonVisualizationExcerptsHistograms:
                 sumOfEntries = counterObservationsPrecise + counterObservationsObscured
@@ -1740,6 +1761,6 @@ if createPersonVisualizationExcerpts:
 
                 fig = go.Figure(data=data, layout=layout)
                 # fig.update_xaxes(showticklabels=False)
-                pio.write_image(fig, 'vis' + os.sep + '0_people-moves-iNaturalist_' + str(rankCounter).zfill(2) + "_" + personLabel.replace('@', '_') + '-histogram.pdf')
+                pio.write_image(fig, 'vis' + os.sep + '0_people-moves-iNaturalist_' + personID + '-histogram.pdf')
 
     outfile.close()
