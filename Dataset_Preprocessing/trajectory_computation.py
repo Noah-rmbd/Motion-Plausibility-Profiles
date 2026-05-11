@@ -46,7 +46,12 @@ def location_point_preprocessing(directory: str) -> [dict, dict, list, list, lis
         if not df.empty:
             for uid, id, observed_on, time_observed_at, coordinates_obscured, latitude, longitude, taxon_family_name in zip(df["user_id"], df["id"], df["observed_on"], df["time_observed_at"], df["coordinates_obscured"], df["latitude"], df["longitude"], df["taxon_family_name"]):
                 # Handle obscured coordinates
-                if coordinates_obscured:
+                is_obscured = False
+                if pd.notna(coordinates_obscured):
+                    if coordinates_obscured is True or str(coordinates_obscured).strip().lower() == "true":
+                        is_obscured = True
+
+                if is_obscured:
                     obscured_observations.append({
                         "user_id": uid,
                         "observation_id": id,
@@ -79,6 +84,9 @@ def location_point_preprocessing(directory: str) -> [dict, dict, list, list, lis
     # Convert the dictionnaries into lists of dictionnaries for the .json conversion
     for user in users_dictionary.keys():
         users_list.append({"username": user, "nb_observations": users_dictionary[user]})
+        
+    # Sort the users list by number of unobscured observations descending
+    users_list.sort(key=lambda x: x["nb_observations"], reverse=True)
     
     for species in location_points.keys():
         species_observations = []
@@ -250,19 +258,19 @@ def trips_and_trajectory_preprocessing():
 def location_point_preprocessing_and_export():
     location_points, location_id, users_list, species_list, obscured_observations, observations = location_point_preprocessing("Observations/")
     # Export data made for ML algorithms in .pkl format
-    with open('Preprocessed-Dataset/location_points.pkl', 'wb') as f:
+    with open('Preprocessed_Dataset/location_points.pkl', 'wb') as f:
         pickle.dump(location_points, f)
-    with open('Preprocessed-Dataset/location_points_id.pkl', 'wb') as f:
+    with open('Preprocessed_Dataset/location_points_id.pkl', 'wb') as f:
         pickle.dump(location_id, f)
 
     # Export data made for Interactive Visualization in .json format
-    with open("Preprocessed-Dataset/users_list.json", "w") as f:
+    with open("Preprocessed_Dataset/users_list.json", "w") as f:
         f.write(json.dumps(users_list, indent=4))
-    with open("Preprocessed-Dataset/species_list.json", "w") as f:
+    with open("Preprocessed_Dataset/species_list.json", "w") as f:
         f.write(json.dumps(species_list, indent=4))
-    with open("Preprocessed-Dataset/obscured_observations.json", "w") as f:
+    with open("Preprocessed_Dataset/obscured_observations.json", "w") as f:
         f.write(json.dumps(obscured_observations, indent=4))
-    with open("Preprocessed-Dataset/observations.json", "w") as f:
+    with open("Preprocessed_Dataset/observations.json", "w") as f:
         f.write(json.dumps(observations, indent=4))
 
 def trips_and_trajectory_preprocessing_and_export():
@@ -277,20 +285,20 @@ def trips_and_trajectory_preprocessing_and_export():
     # END OF THE FUNCTION
 
     # Convert data made for ML algorithms in .pkl format
-    with open('Preprocessed-Dataset/trips.pkl', 'wb') as f:
+    with open('Preprocessed_Dataset/trips.pkl', 'wb') as f:
         pickle.dump(trips, f)
-    with open('Preprocessed-Dataset/trips_id.pkl', 'wb') as f:
+    with open('Preprocessed_Dataset/trips_id.pkl', 'wb') as f:
         pickle.dump(trips_id, f)
     
-    with open('Preprocessed-Dataset/trajectories.pkl', 'wb') as f:
+    with open('Preprocessed_Dataset/trajectories.pkl', 'wb') as f:
         pickle.dump(trajectories, f)
-    with open('Preprocessed-Dataset/trajectories_id.pkl', 'wb') as f:
+    with open('Preprocessed_Dataset/trajectories_id.pkl', 'wb') as f:
         pickle.dump(trajectories_id, f)
 
     # Convert data made for Interactive Visualization in .json format
-    with open("Preprocessed-Dataset/transitions_list.json", "w") as f:
+    with open("Preprocessed_Dataset/transitions_list.json", "w") as f:
         f.write(json.dumps(transitions_list, indent=4))
-    with open("Preprocessed-Dataset/trajectories_list.json", "w") as f:
+    with open("Preprocessed_Dataset/trajectories_list.json", "w") as f:
         f.write(json.dumps(trajectories_list, indent=4))
 
 if preprocess_location_points:

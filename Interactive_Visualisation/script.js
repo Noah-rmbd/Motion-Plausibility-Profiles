@@ -3,29 +3,28 @@ let appData = {
     transitions_list: [],
     trajectories_list: [],
     obscured_observations: [],
+    observations: [],
     obsCoordsMap: {}
 };
 
 async function fetchAndParseUsers() {
     try {
-        const [usersRes, transRes, trajRes, obsRes, speciesRes] = await Promise.all([
-            fetch('../Preprocessed-Dataset/users_list.json'),
-            fetch('../Preprocessed-Dataset/transitions_list.json'),
-            fetch('../Preprocessed-Dataset/trajectories_list.json'),
-            fetch('../Preprocessed-Dataset/obscured_observations.json'),
-            fetch('../Preprocessed-Dataset/species_list.json')
+        const [usersRes, transRes, trajRes, obsRes, allObsRes] = await Promise.all([
+            fetch('../Preprocessed_Dataset/users_list.json'),
+            fetch('../Preprocessed_Dataset/transitions_list.json'),
+            fetch('../Preprocessed_Dataset/trajectories_list.json'),
+            fetch('../Preprocessed_Dataset/obscured_observations.json'),
+            fetch('../Preprocessed_Dataset/observations.json')
         ]);
 
         appData.users_list = await usersRes.json();
         appData.transitions_list = await transRes.json();
         appData.trajectories_list = await trajRes.json();
         appData.obscured_observations = await obsRes.json();
-        const speciesList = await speciesRes.json();
+        appData.observations = await allObsRes.json();
 
-        for (let species of speciesList) {
-            for (let obs of species.observations) {
-                appData.obsCoordsMap[obs.id] = { lat: obs.lat, lon: obs.long };
-            }
+        for (let obs of appData.observations) {
+            appData.obsCoordsMap[obs.observation_id] = { lat: obs.lat, lon: obs.long };
         }
 
         const users = appData.users_list.map(u => String(u.username));
@@ -119,6 +118,14 @@ async function renderPlotlyProfile(user_id) {
 
         const userTransitions = appData.transitions_list.filter(t => String(t.user_id) === String(user_id));
         const userObscured = appData.obscured_observations.filter(o => String(o.user_id) === String(user_id));
+        const userObservations = appData.observations.filter(o => String(o.user_id) === String(user_id));
+
+        let transitionObsIds = new Set();
+        for (let t of userTransitions) {
+            transitionObsIds.add(String(t.observation_id1).replace('iN-p', '').replace('iN-o', ''));
+            transitionObsIds.add(String(t.observation_id2).replace('iN-p', '').replace('iN-o', ''));
+        }
+        let isolatedObs = userObservations.filter(o => !transitionObsIds.has(String(o.observation_id)));
 
         let shapeList = [];
         let markerSize = 8.0;
@@ -140,10 +147,20 @@ async function renderPlotlyProfile(user_id) {
             let d = o.date.trim();
             if (!obscuredByDate[d]) obscuredByDate[d] = [];
             obscuredByDate[d].push(o);
+            validDatesPlotly.add(d.replace(/\//g, '-'));
+        }
+
+        // Group isolated by date
+        let isolatedByDate = {};
+        for (let o of isolatedObs) {
+            let d = o.date.trim().substring(0, 10).replace(/-/g, '/');
+            if (!isolatedByDate[d]) isolatedByDate[d] = [];
+            isolatedByDate[d].push(o);
+            validDatesPlotly.add(d.replace(/\//g, '-'));
         }
 
         // Get all unique dates sorted
-        let allDates = Array.from(new Set([...Object.keys(transitionsByDate), ...Object.keys(obscuredByDate)])).sort();
+        let allDates = Array.from(new Set([...Object.keys(transitionsByDate), ...Object.keys(obscuredByDate), ...Object.keys(isolatedByDate)])).sort();
 
         for (let date of allDates) {
             dataEntryCounter += 1;
@@ -152,6 +169,7 @@ async function renderPlotlyProfile(user_id) {
             let dateAnchor = date.replace(/\//g, '-');
             let trans = transitionsByDate[date] || [];
             let obs = obscuredByDate[date] || [];
+            let isolated = isolatedByDate[date] || [];
 
             // Draw obscured shapes first (as squares)
             for (let o of obs) {
@@ -166,6 +184,23 @@ async function renderPlotlyProfile(user_id) {
                     x1: markerSize * 1.5 + horizontalOffset, y1: markerSize * 0.5,
                     line: { color: 'black', width: 1 },
                     fillcolor: 'white'
+                });
+                horizontalOffset += markerSize;
+            }
+
+            // Draw isolated shapes as green circles
+            for (let o of isolated) {
+                let shapeIdx = shapeList.length;
+                shapeIndexMap['obs_' + String(o.observation_id)] = shapeIdx;
+                shapeList.push({
+                    type: "circle",
+                    xsizemode: 'pixel', ysizemode: 'pixel',
+                    xanchor: dateAnchor,
+                    yanchor: dataEntryCounter,
+                    x0: markerSize * 0.5 + horizontalOffset, y0: -markerSize * 0.5,
+                    x1: markerSize * 1.5 + horizontalOffset, y1: markerSize * 0.5,
+                    line: { width: 0 },
+                    fillcolor: 'rgb(26, 150, 65)' // Green for isolated unobscured observations
                 });
                 horizontalOffset += markerSize;
             }
@@ -372,8 +407,16 @@ async function updateMapForDate(user_id, dates) {
 
         const userTransitions = appData.transitions_list.filter(t => String(t.user_id) === String(user_id) && dates.includes(t.date.trim()));
         const userObscured = appData.obscured_observations.filter(o => String(o.user_id) === String(user_id) && dates.includes(o.date.trim()));
+        const userObservations = appData.observations.filter(o => String(o.user_id) === String(user_id) && dates.includes(o.date.trim().substring(0, 10).replace(/-/g, '/')));
 
-        if (userTransitions.length === 0 && userObscured.length === 0) {
+        let transitionObsIds = new Set();
+        for (let t of userTransitions) {
+            transitionObsIds.add(String(t.observation_id1).replace('iN-p', '').replace('iN-o', ''));
+            transitionObsIds.add(String(t.observation_id2).replace('iN-p', '').replace('iN-o', ''));
+        }
+        let isolatedObs = userObservations.filter(o => !transitionObsIds.has(String(o.observation_id)));
+
+        if (userTransitions.length === 0 && userObscured.length === 0 && isolatedObs.length === 0) {
             console.log("No valid points to display for this date.");
             return;
         }
@@ -406,6 +449,21 @@ async function updateMapForDate(user_id, dates) {
                 currentMarkers.push(marker);
                 bounds.extend([p2.lat, p2.lon]);
                 addedPoints.add(t.observation_id2);
+            }
+        }
+
+        // Draw isolated unobscured points
+        for (let o of isolatedObs) {
+            let p1 = { lat: o.lat, lon: o.long };
+            if (!addedPoints.has(String(o.observation_id))) {
+                const marker = L.marker([p1.lat, p1.lon], { icon: circleIcon }).addTo(leafletMap);
+                marker.bindTooltip(`<b>ID:</b> ${o.observation_id}<br><b>Lat:</b> ${p1.lat.toFixed(5)}<br><b>Lon:</b> ${p1.lon.toFixed(5)}<br><b>Date:</b> ${o.date}`);
+                const obsKey = 'obs_' + String(o.observation_id);
+                marker.on('mouseover', () => { if (shapeIndexMap[obsKey] !== undefined) highlightProfileShape(shapeIndexMap[obsKey]); });
+                marker.on('mouseout', clearProfileHighlight);
+                currentMarkers.push(marker);
+                bounds.extend([p1.lat, p1.lon]);
+                addedPoints.add(String(o.observation_id));
             }
         }
 
@@ -488,6 +546,22 @@ async function setTimeline(user_id) {
         appData.transitions_list.forEach(t => {
             if (String(t.user_id) === String(user_id) && t.date.includes('/')) {
                 activeDays.add(t.date.trim());
+            }
+        });
+
+        // Add days with obscured observations
+        appData.obscured_observations.forEach(o => {
+            if (String(o.user_id) === String(user_id)) {
+                let d = o.date.trim().substring(0, 10).replace(/-/g, '/');
+                activeDays.add(d);
+            }
+        });
+
+        // Add days with isolated observations
+        appData.observations.forEach(o => {
+            if (String(o.user_id) === String(user_id)) {
+                let d = o.date.trim().substring(0, 10).replace(/-/g, '/');
+                activeDays.add(d);
             }
         });
 
@@ -736,13 +810,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 1. Fetch the user list and stats
     const users = await fetchAndParseUsers();
 
-    let userStats = {};
+    let usernames = {};
     try {
-        const statsResponse = await fetch('ressources/user_stats.json');
+        const statsResponse = await fetch('ressources/usernames.json');
         if (statsResponse.ok) {
-            userStats = await statsResponse.json();
+            usernames = await statsResponse.json();
         }
-    } catch (e) { console.warn("Could not load user stats"); }
+    } catch (e) { console.warn("Could not load usernames"); }
 
     // 2. Identify the select element
     const selectElement = document.getElementById('user-select');
@@ -760,10 +834,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    // Create a dictionary of user counts for fast lookup
+    let userCounts = {};
+    if (appData && appData.users_list) {
+        for (const u of appData.users_list) {
+            userCounts[String(u.username)] = u.nb_observations || 0;
+        }
+    }
+
     // Sort users by count descending
     users.sort((a, b) => {
-        const countA = userStats[a] ? userStats[a].count : 0;
-        const countB = userStats[b] ? userStats[b].count : 0;
+        const countA = userCounts[a] || 0;
+        const countB = userCounts[b] || 0;
         return countB - countA;
     });
 
@@ -777,8 +859,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     for (const user of topUsers) {
         const option = document.createElement('option');
         option.value = user;
-        const uname = userStats[user] ? userStats[user].username : "Unknown";
-        const count = userStats[user] ? userStats[user].count : 0;
+        const uname = usernames[user] || "Unknown";
+        const count = userCounts[user] || 0;
         option.textContent = `${uname} (${count} obs)`;
         fragment.appendChild(option);
     }

@@ -228,7 +228,6 @@ h1 {
     height: auto;
     display: flex;
     align-items: center;
-    border: 1px solid rgba(0, 0, 0, 0.2);
 }
 
 /* Hide arrows when zoomed out to improve performance */
