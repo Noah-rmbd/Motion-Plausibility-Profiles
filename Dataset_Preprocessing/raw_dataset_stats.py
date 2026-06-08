@@ -3,12 +3,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import csv
-import powerlaw
+import pickle
 
 # Select what metrics you want to compute
 compute_most_active_users = True
 compute_count_valid_sequences = True
 compute_plot_speed_distribution = True
+compute_iNaturalist_stats = False
+compute_Gowalla_stats = True
 
 #########################################################
 # Return the list of the most active users in the dataset
@@ -110,10 +112,10 @@ def count_valid_sequences():
 #######################################################################################
 # Shows how the speeds and distances between points in a valid sequence are distributed
 #######################################################################################
-def plot_speed_distribution():
+def plot_speed_distribution(file_path):
     speeds = []
     distances = []
-    with open("frequent-poster.log", "r") as f:
+    with open(file_path, "r") as f:
         for line in f:
             parts = line.strip().split(", ")
             if len(parts) == 8 and parts[7].endswith("km/h"):
@@ -134,98 +136,39 @@ def plot_speed_distribution():
     clean_speeds = speeds_arr[(speeds_arr>0.3)]
 
     if len(speeds) > 0:
-        fit_speed = powerlaw.Fit(clean_speeds)
-        fit_distance = powerlaw.Fit(distances)
-        print(f"Power law alpha_speed: {fit_speed.power_law.alpha}")
-        print(f"Power law xmin_speed: {fit_speed.power_law.xmin}")
-        print(f"Power law alpha_distance: {fit_distance.power_law.alpha}")
-        print(f"Power law xmin_distance: {fit_distance.power_law.xmin}")
-
-        # Pit the power law directly against the log-normal distribution
-        R_speed, p_speed = fit_speed.distribution_compare('power_law', 'lognormal')
-        R_distance, p_distance = fit_distance.distribution_compare('power_law', 'lognormal')
-
-        print(f"Log-likelihood ratio (R_speed): {R_speed}")
-        print(f"p-value_speed: {p_speed}")
-        print(f"Log-likelihood ratio (R_distance): {R_distance}")
-        print(f"p-value_distance: {p_distance}")
-        
-        print(f"Lognormal mu distance: {fit_distance.lognormal.mu}")
-        print(f"Lognormal sigma distance: {fit_distance.lognormal.sigma}")
-        
         os.makedirs('vis', exist_ok=True)
         
         # -- SPEED PLOT --
         plt.figure(figsize=(10, 6))
-        fit_speed.plot_pdf(color='b', linewidth=2, label='Empirical Data (pdf)')
-        fit_speed.power_law.plot_pdf(color='r', linestyle='--', label=f'Power Law Fit (alpha={fit_speed.power_law.alpha:.2f})')
-        plt.title('Distribution of Speeds (Log-Log scale)')
+        plt.hist(clean_speeds, bins=100, color='b', alpha=0.7, density=True)
+        plt.title('Distribution of Speeds')
         plt.xlabel('Speed (km/h)')
-        plt.ylabel('P(Speed)')
-        plt.legend()
-        plt.grid(True, which="both", ls="-", alpha=0.2)
-        plt.savefig('vis/0_speed_powerlaw_distribution.png', bbox_inches='tight')
+        plt.ylabel('Density')
+        plt.grid(True, alpha=0.3)
+        plt.savefig('vis/0_speed_distribution.png', bbox_inches='tight')
         plt.close()
-        print("Saved plot to vis/0_speed_powerlaw_distribution.png")
+        print("Saved plot to vis/0_speed_distribution.png")
 
         # -- DISTANCE PLOT --
+        distances_arr = np.array(distances)
+        clean_distances = distances_arr[distances_arr > 0]
         plt.figure(figsize=(10, 6))
-        fit_distance.plot_pdf(color='b', linewidth=2, label='Empirical Data (pdf)')
-        fit_distance.power_law.plot_pdf(color='r', linestyle='--', label=f'Power Law Fit (alpha={fit_distance.power_law.alpha:.2f})')
-        fit_distance.lognormal.plot_pdf(color='g', linestyle='-.', label=f'Log-Normal Fit (mu={fit_distance.lognormal.mu:.2f}, sigma={fit_distance.lognormal.sigma:.2f})')
-        plt.title('Distribution of Distances (Log-Log scale)')
+        plt.hist(clean_distances, bins=100, color='b', alpha=0.7, density=True)
+        plt.title('Distribution of Distances')
         plt.xlabel('Distance (m)')
-        plt.ylabel('P(Distance)')
-        plt.legend()
-        plt.grid(True, which="both", ls="-", alpha=0.2)
-        plt.savefig('vis/0_distance_powerlaw_distribution.png', bbox_inches='tight')
+        plt.ylabel('Density')
+        plt.grid(True, alpha=0.3)
+        plt.savefig('vis/0_distance_distribution.png', bbox_inches='tight')
         plt.close()
-        print("Saved plot to vis/0_distance_powerlaw_distribution.png")
-
-        # Your parameters
-        alpha_speed = fit_speed.power_law.alpha
-        x_min_speed = fit_speed.power_law.xmin
-        alpha_distance = fit_distance.power_law.alpha
-        x_min_distance = fit_distance.power_law.xmin
-
-        # Generate data points
-        # We use np.linspace for linear scale, or np.logspace for a smoother log plot
-        x_speed = np.linspace(x_min_speed, x_min_speed * 10, 1000)
-        x_distance = np.linspace(x_min_distance, x_min_distance * 10, 1000)
-
-        # The Power Law PDF Formula
-        # y = ((alpha - 1) / x_min) * (x / x_min)**(-alpha)
-        y = ((alpha_speed - 1) / x_min_speed) * (x_speed / x_min_speed)**(-alpha_speed)
-        y_distance = ((alpha_distance - 1) / x_min_distance) * (x_distance / x_min_distance)**(-alpha_distance)
-
-        # Create the figure with two subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-
-        # Plot 1: Linear Scale (The "Long Tail")
-        ax1.plot(x_speed, y, color='tab:blue', lw=2)
-
-        ax1.set_title(f"Linear Scale ($alpha$={alpha_speed})")
-        ax1.set_xlabel("x")
-        ax1.set_ylabel("P(x)")
-        ax1.grid(True, alpha=0.3)
-
-        # Plot 2: Log-Log Scale (The "Straight Line")
-        ax2.loglog(x_speed, y, color='tab:red', lw=2)
-        ax2.set_title(f"Log-Log Scale (Slope = -{alpha_speed})")
-        ax2.set_xlabel("x (log)")
-        ax2.set_ylabel("P(x) (log)")
-        ax2.grid(True, which="both", ls="-", alpha=0.2)
-
-        plt.tight_layout()
-        plt.savefig('vis/0_speed_powerlaw_nolog.png')
+        print("Saved plot to vis/0_distance_distribution.png")
 
     else:
         print("No valid speed data found.")
 
-
-if compute_most_active_users:
-    most_active_users()
-if compute_count_valid_sequences:
-    count_valid_sequences()
+if compute_iNaturalist_stats:
+    if compute_most_active_users:
+        most_active_users()
+    if compute_count_valid_sequences:
+        count_valid_sequences()
 if compute_plot_speed_distribution:
-    plot_speed_distribution()
+    plot_speed_distribution("frequent-poster.log" if compute_iNaturalist_stats else "gowalla_frequent_poster.log")

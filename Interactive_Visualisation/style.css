@@ -185,6 +185,20 @@ h1 {
     font-weight: bold;
 }
 
+.timeline-day.unplausible {
+    background-color: rgba(220, 53, 69, 0.8);
+    border: 1px solid #ff4d4d;
+}
+
+.timeline-day.unplausible:hover {
+    background-color: rgba(220, 53, 69, 1);
+}
+
+.timeline-day.unplausible.selected {
+    background-color: rgba(220, 53, 69, 1);
+    border: 2px solid white;
+}
+
 /* Legend Styles */
 .info.legend {
     background: rgba(255, 255, 255, 0.9);

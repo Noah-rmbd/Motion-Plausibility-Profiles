@@ -5,11 +5,15 @@ import os
 import json
 import math
 from sklearn.preprocessing import RobustScaler, MinMaxScaler
+try:
+    from Dataset_Preprocessing.utils import compute_bearing
+except ModuleNotFoundError:
+    from utils import compute_bearing
 import matplotlib.pyplot as plt
 
 # Select what shape of data you want to precompute
-preprocess_location_points = True #True
-preprocess_trips = True
+preprocess_location_points = True
+preprocess_transitions = True
 
 # List and return .csv files in a directory
 def open_dataset(directory):
@@ -96,56 +100,68 @@ def location_point_preprocessing(directory: str) -> [dict, dict, list, list, lis
 
     return location_points, location_points_id, users_list, species_list, obscured_observations, observations
 
-# Calculate bearing between two points
-def compute_bearing(lat1, lon1, lat2, lon2):
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dlam = math.radians(lon2 - lon1)
-    x = math.sin(dlam) * math.cos(phi2)
-    y = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlam)
-    return math.atan2(x, y)
-
-def normalize_trips_and_trajectories(trips, trajectories):
+def normalize_transitions_and_trajectories(transitions, trajectories):
+    # Save unnormalized trajectories before scaling
+    unnormalized_trajectories = [np.array(traj).copy() for traj in trajectories]
+    
     # Normalize each parameter of a trip (speed, elapsed time, distance, acceleration, bearing change)
-    trips = np.array(trips, dtype=object)
-    trips_size = np.shape(trips)[0]
+    transitions = np.array(transitions, dtype=object)
+    transitions_size = np.shape(transitions)[0]
 
     speed_scaler = MinMaxScaler()
     elapsed_time_scaler = MinMaxScaler()
     distance_scaler = MinMaxScaler()
     acceleration_scaler = MinMaxScaler()
-    bearing_change_scaler = MinMaxScaler()
+    # Bearing change is converted to Sine and Cosine (which are already correctly bounded [-1, 1])
 
-    # Fit each scaler on every value and then normalize those values 
-    trips[:,1] = speed_scaler.fit_transform(np.log1p(trips[:,1].astype(float)).reshape(-1,1)).reshape(trips_size,)
-    trips[:,2] = elapsed_time_scaler.fit_transform(trips[:,2].reshape(-1,1)).reshape(trips_size,)
-    trips[:,3] = distance_scaler.fit_transform(trips[:,3].reshape(-1,1)).reshape(trips_size,)
-    trips[:,4] = acceleration_scaler.fit_transform(trips[:,4].reshape(-1,1)).reshape(trips_size,)
-    trips[:,5] = bearing_change_scaler.fit_transform(trips[:,5].reshape(-1,1)).reshape(trips_size,)
+    # Extract speeds to fit the scaler without taking >900 values into account
+    speeds = transitions[:,0].astype(float)
+    valid_speeds = speeds[speeds <= 900.0]
+    if len(valid_speeds) > 0:
+        speed_scaler.fit(np.log1p(valid_speeds).reshape(-1,1))
+    else:
+        speed_scaler.fit(np.log1p(speeds).reshape(-1,1))
+
+    # Create new transitions array with 6 columns
+    new_transitions = np.zeros((transitions_size, 6), dtype=float)
+    new_transitions[:,0] = speed_scaler.transform(np.log1p(speeds).reshape(-1,1)).reshape(transitions_size,)
+    new_transitions[:,1] = elapsed_time_scaler.fit_transform(transitions[:,1].reshape(-1,1)).reshape(transitions_size,)
+    new_transitions[:,2] = distance_scaler.fit_transform(transitions[:,2].reshape(-1,1)).reshape(transitions_size,)
+    new_transitions[:,3] = acceleration_scaler.fit_transform(transitions[:,3].reshape(-1,1)).reshape(transitions_size,)
+    new_transitions[:,4] = (np.sin(transitions[:,4].astype(float)) + 1.0) / 2.0
+    new_transitions[:,5] = (np.cos(transitions[:,4].astype(float)) + 1.0) / 2.0
     
+    # Save unnormalized trajectories before scaling
+    unnormalized_trajectories = [np.array(traj).copy() for traj in trajectories]
+
     # Normalize the values stored in each trajectory
     for i in range(len(trajectories)):
         trajectory = np.array(trajectories[i], dtype=object)
         trajectory_size = np.shape(trajectory)[0]
-        trajectory[:,1] = speed_scaler.transform(np.log1p(trajectory[:,1].astype(float)).reshape(-1,1)).reshape(trajectory_size,)
-        trajectory[:,2] = elapsed_time_scaler.transform(trajectory[:,2].reshape(-1,1)).reshape(trajectory_size,)
-        trajectory[:,3] = distance_scaler.transform(trajectory[:,3].reshape(-1,1)).reshape(trajectory_size,)
-        trajectory[:,4] = acceleration_scaler.transform(trajectory[:,4].reshape(-1,1)).reshape(trajectory_size,)
-        trajectory[:,5] = bearing_change_scaler.transform(trajectory[:,5].reshape(-1,1)).reshape(trajectory_size,)
-        trajectories[i] = trajectory
+        traj_speeds = trajectory[:,0].astype(float)
+        
+        new_traj = np.zeros((trajectory_size, 6), dtype=float)
+        new_traj[:,0] = speed_scaler.transform(np.log1p(traj_speeds).reshape(-1,1)).reshape(trajectory_size,)
+        new_traj[:,1] = elapsed_time_scaler.transform(trajectory[:,1].reshape(-1,1)).reshape(trajectory_size,)
+        new_traj[:,2] = distance_scaler.transform(trajectory[:,2].reshape(-1,1)).reshape(trajectory_size,)
+        new_traj[:,3] = acceleration_scaler.transform(trajectory[:,3].reshape(-1,1)).reshape(trajectory_size,)
+        new_traj[:,4] = (np.sin(trajectory[:,4].astype(float)) + 1.0) / 2.0
+        new_traj[:,5] = (np.cos(trajectory[:,4].astype(float)) + 1.0) / 2.0
+        trajectories[i] = new_traj
     
-    return trips, trajectories
+    return new_transitions, trajectories, unnormalized_trajectories
 
-def trips_and_trajectory_preprocessing():
+def transitions_and_trajectory_preprocessing():
     # Computes valid transitions and trajectories between valid observations
-    trip_nb = 0 # Variable to determine the id of a trip
-    trips = [] # List of every trips between valid observations in the database
-    trips_id = [] # List of trip_id that correspond to the trip located at the same index in trips[], store in addition the ids of its observations
+    transition_nb = 0 # Variable to determine the id of a transition
+    transitions = [] # List of every transitions between valid observations in the database
+    transitions_id = [] # List of transition_id that correspond to the transition located at the same index in transitions[], store in addition the ids of its observations
     transitions_list = [] # List of transitions for the interactive visualization
 
     trajectory_nb = 0 # Variable to determine the id of a trajectory
     trajectory = [] # Store temporarily a new trajectory at each iteration
     trajectories = [] # List of every valid trajectory in the dataset
-    trajectories_id = [] # List of trajectory_id that correspond to the trajectory located at the same index in trajectories[], store in addition the id of its inner trips
+    trajectories_id = [] # List of trajectory_id that correspond to the trajectory located at the same index in trajectories[], store in addition the id of its inner transitions
     trajectories_list = [] # List of trajectories for the interactive visualization
 
     trajectory_user = {} # Dictionary that takes the trajectory_id and returns its corresponding user
@@ -177,7 +193,7 @@ def trips_and_trajectory_preprocessing():
                     else:
                         if line_elements[3] != prev_date:
                             if trajectory != []:
-                                # A trajectory should contain at least 2 trips (3 valid observations)
+                                # A trajectory should contain at least 2 transitions (3 valid observations)
                                 if len(trajectory) >= 2:
                                     trajectories.append(trajectory)
                                     trajectories_id.append(trajectory_id)
@@ -197,17 +213,19 @@ def trips_and_trajectory_preprocessing():
                 # For the other observations in a day        
                 elif len(line_elements) == 8:
                     obs_id = line_elements[0]
-                    # If the observation is unobscured
-                    if prev_date == line_elements[3] and not obs_id.startswith("iN-o"):
+                    # If the observation is unobscured and distance is valid
+                    if prev_date == line_elements[3] and not obs_id.startswith("iN-o") and line_elements[6] != ' N/A':
                         lat = float(line_elements[1])
                         lon = float(line_elements[2])
                         elapsed_time = float(line_elements[5].replace("s", ""))
                         distance = float(line_elements[6].replace("m", ""))
-                        speed_kmh = float(line_elements[7].replace("km/h", ""))
-                        
-                        # Handle sentinel value -1.0km/h for 0s elapsed time
-                        if speed_kmh < 0:
-                            speed_kmh = 0.0
+                        if elapsed_time > 0:
+                            speed_kmh = (distance / elapsed_time) * 3.6
+                        else:
+                            speed_kmh = float(line_elements[7].replace("km/h", ""))
+                            # Handle sentinel value -1.0km/h for 0s elapsed time
+                            if speed_kmh < 0:
+                                speed_kmh = 0.0
                         
                         if prev_point is not None:
                             prev_id, prev_lat, prev_lon, prev_speed_ms, prev_bearing = prev_point
@@ -223,14 +241,35 @@ def trips_and_trajectory_preprocessing():
                                 # Normalize bearing change to be between -pi and pi
                                 bearing_change = (bearing_change + math.pi) % (2 * math.pi) - math.pi
                             
-                            # TrajectoryPoint: [trip_id, speed, time, distance, acceleration, bearing_change, date, user_id]
-                            trip = [trip_nb, speed_kmh, elapsed_time, distance, acceleration, bearing_change, prev_date, prev_user]
-                            trips.append(trip)
-                            trips_id.append((trip_nb, prev_id, obs_id))
+                            plausibility_reason = None
+                            # If speed is above 900 Km/h (maximum commercial flight speed), then this state transition is impossible
+                            if speed_kmh > 900.0:
+                                transition_plausibility = 0 # 0 = this transition is impossible
+                                plausibility_reason = "Too high speed"
+                            elif elapsed_time > 86400.0:
+                                transition_plausibility = 0
+                                plausibility_reason = "Elapsed time exceeds 24 hours"
+                            elif distance > 10000000.0:
+                                transition_plausibility = 0
+                                plausibility_reason = "Distance exceeds 10,000 km"
+                            elif abs(acceleration) > 50.0:
+                                transition_plausibility = 0
+                                plausibility_reason = "Acceleration exceeds 50 m/s^2"
+                            elif (speed_kmh > 30.0 and elapsed_time <= 30) or (speed_kmh > 200.0 and elapsed_time <= 300) or (speed_kmh > 300.0 and elapsed_time <= 3600):
+                                transition_plausibility = 0
+                                plausibility_reason = "This speed cannot be reached with any vehicle during such a small amount of time"
+                            else:
+                                transition_plausibility = 1 # 1 = this transition is plausible
 
-                            trajectory.append(trip)
-                            trajectory_id.append(trip_nb)
-                            trip_nb += 1
+                            # TrajectoryPoint: [speed, elapsed_time (s), distance (m), acceleration (m/s^2), bearing_change (rad)]
+                            transition = [speed_kmh, elapsed_time, distance, acceleration, bearing_change]
+                            transitions.append(transition)
+                            # Trajectory_id: [transition_id, observation1_id, observation2_id, date, user_id, transition_plausibility, plausibility_reason]
+                            transitions_id.append((transition_nb, prev_id, obs_id, prev_date, prev_user, transition_plausibility, plausibility_reason))
+
+                            trajectory.append(transition)
+                            trajectory_id.append(transition_nb)
+                            transition_nb += 1
                             
                             # Update prev point for next iteration (pass current_bearing onwards)
                             prev_point = [obs_id, lat, lon, speed_ms, current_bearing]
@@ -244,16 +283,21 @@ def trips_and_trajectory_preprocessing():
         f.close()
 
         # Before normalizing data for ML algorithms, we save the original values for the interactive visualisation
-        for i in range(len(trips)):
-            transitions_list.append({"transition_id": trips[i][0], "user_id": trips[i][7], "observation_id1": trips_id[i][1], "observation_id2": trips_id[i][2], "date": trips[i][6], "speed": trips[i][1], "elapsed_time": trips[i][2], "distance": trips[i][3], "acceleration": trips[i][4], "bearing_change": trips[i][5]})
+        for i in range(len(transitions)):
+            transition_id = transitions_id[i]
+            reason = transition_id[6] if len(transition_id) > 6 else None
+            transitions_list.append({"transition_id": transition_id[0], "user_id": transition_id[4], "observation_id1": transition_id[1], "observation_id2": transition_id[2], "date": transition_id[3], "speed": transitions[i][0], "elapsed_time": transitions[i][1], "distance": transitions[i][2], "acceleration": transitions[i][3], "bearing_change": transitions[i][4], "transition_plausibility": transition_id[5], "plausibility_reason": reason})
         for t in range(len(trajectories)):
-            trajectories_list.append({"trajectory_id": trajectories_id[t][0], "user_id": trajectories[t][0][7], "date": trajectories[t][0][6], "transitions": trajectories_id[t][1:]})
+            first_transition_id = trajectories_id[t][1]
+            user_id = transitions_id[first_transition_id][4]
+            date = transitions_id[first_transition_id][3]
+            trajectories_list.append({"trajectory_id": trajectories_id[t][0], "user_id": user_id, "date": date, "transitions": trajectories_id[t][1:]})
 
-        # Normalize every parameter in trips and trajectories
-        trips, trajectories = normalize_trips_and_trajectories(trips, trajectories)
+        # Normalize every parameter in transitions and trajectories
+        transitions, trajectories, unnormalized_trajectories = normalize_transitions_and_trajectories(transitions, trajectories)
 
         
-    return trips, trips_id, transitions_list, trajectories, trajectories_id, trajectories_list
+    return transitions, transitions_id, transitions_list, trajectories, trajectories_id, trajectories_list, unnormalized_trajectories
 
 def location_point_preprocessing_and_export():
     location_points, location_id, users_list, species_list, obscured_observations, observations = location_point_preprocessing("Observations/")
@@ -273,27 +317,29 @@ def location_point_preprocessing_and_export():
     with open("Preprocessed_Dataset/observations.json", "w") as f:
         f.write(json.dumps(observations, indent=4))
 
-def trips_and_trajectory_preprocessing_and_export():
-    trips, trips_id, transitions_list, trajectories, trajectories_id, trajectories_list = trips_and_trajectory_preprocessing()
+def transitions_and_trajectory_preprocessing_and_export():
+    transitions, transitions_id, transitions_list, trajectories, trajectories_id, trajectories_list, unnormalized_trajectories = transitions_and_trajectory_preprocessing()
     
     # CREATE A FUNCTION TO AUTOMATE THE PLOTS CALCULATION
-    '''plt.hist(trips[:, 1], bins=50, range=(0,1), edgecolor='black')
+    plt.hist(transitions[:, 1], bins=50, range=(0,1), edgecolor='black')
     plt.title("Distribution of Normalized Speed")
     plt.xlabel("Normalized Speed")
     plt.ylabel("Frequency")
-    plt.show()'''
+    plt.show()
     # END OF THE FUNCTION
 
     # Convert data made for ML algorithms in .pkl format
-    with open('Preprocessed_Dataset/trips.pkl', 'wb') as f:
-        pickle.dump(trips, f)
-    with open('Preprocessed_Dataset/trips_id.pkl', 'wb') as f:
-        pickle.dump(trips_id, f)
+    with open('Preprocessed_Dataset/transitions.pkl', 'wb') as f:
+        pickle.dump(transitions, f)
+    with open('Preprocessed_Dataset/transitions_id.pkl', 'wb') as f:
+        pickle.dump(transitions_id, f)
     
     with open('Preprocessed_Dataset/trajectories.pkl', 'wb') as f:
         pickle.dump(trajectories, f)
     with open('Preprocessed_Dataset/trajectories_id.pkl', 'wb') as f:
         pickle.dump(trajectories_id, f)
+    with open('Preprocessed_Dataset/unnormalized_trajectories.pkl', 'wb') as f:
+        pickle.dump(unnormalized_trajectories, f)
 
     # Convert data made for Interactive Visualization in .json format
     with open("Preprocessed_Dataset/transitions_list.json", "w") as f:
@@ -301,7 +347,8 @@ def trips_and_trajectory_preprocessing_and_export():
     with open("Preprocessed_Dataset/trajectories_list.json", "w") as f:
         f.write(json.dumps(trajectories_list, indent=4))
 
-if preprocess_location_points:
-    location_point_preprocessing_and_export()
-if preprocess_trips:
-    trips_and_trajectory_preprocessing_and_export()
+if __name__ == '__main__':
+    if preprocess_location_points:
+        location_point_preprocessing_and_export()
+    if preprocess_transitions:
+        transitions_and_trajectory_preprocessing_and_export()

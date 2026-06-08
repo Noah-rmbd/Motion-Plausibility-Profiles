@@ -34,8 +34,8 @@ createDataExportForGPSTools = False # generate data for GPS tools (GPX, KML, KMZ
 createGeneralVisualizations = True # produce general/summary visualizations of the data
 generateColorBlindCompatible = False # if false, then use the regular color mappings; otherwise use the adjusted color mappings for people with color impairments
 createPersonVisualizationExcerpts = True # if true, then the Motion Plausibility Profile visualizations are generated for the ppl. mentioned below
-createPersonVisualizationExcerptsWide = True # if true, then the MPPs are more wide than square
-createPersonVisualizationExcerptsHistograms = True # if true, then also export the histogram for each person
+createPersonVisualizationExcerptsWide = False # if true, then the MPPs are more wide than square
+createPersonVisualizationExcerptsHistograms = False # if true, then also export the histogram for each person
 createPersonVisualizationExcerptsWithPredefinedList = False # if true, then use the predefined list below for export, otherwise export people with >= 80 posts
 
 # specify for which poster to export the Motion Plausibility Profiles (using createPersonVisualizationExcerpts)
@@ -819,7 +819,7 @@ if createGeneralVisualizations:
         ))
     layout['annotations'] = annotations
     fig = go.Figure(data=data, layout=layout)
-    pio.write_image(fig, 'vis' + os.sep + '0_iNaturalist-species-count-alphabetical.pdf')
+    # pio.write_image(fig, 'vis' + os.sep + '0_iNaturalist-species-count-alphabetical.pdf')
 
     ##################################
     # create visualization of species counts (rank)
@@ -889,7 +889,7 @@ if createGeneralVisualizations:
         ))
     layout['annotations'] = annotations
     fig = go.Figure(data=data, layout=layout)
-    pio.write_image(fig, 'vis' + os.sep + '0_iNaturalist-species-count-rank.pdf')
+    # pio.write_image(fig, 'vis' + os.sep + '0_iNaturalist-species-count-rank.pdf')
 
     ##################################
     # the power-law plot for the species
@@ -966,7 +966,7 @@ if createGeneralVisualizations:
     fig = go.Figure(data=data, layout=layout)
     # fig.update_xaxes(showline=True, linewidth=2, linecolor='black')
     # fig.update_yaxes(showline=True, linewidth=2, linecolor='black')
-    pio.write_image(fig, 'vis' + os.sep + '0_iNaturalist-species-count-distribution.pdf')
+    # pio.write_image(fig, 'vis' + os.sep + '0_iNaturalist-species-count-distribution.pdf')
 
     ##################################
     # create visualization of people's post counts (rank)
@@ -1100,7 +1100,7 @@ if createGeneralVisualizations:
         ))
     layout['annotations'] = annotations
     fig = go.Figure(data=data, layout=layout)
-    pio.write_image(fig, 'vis' + os.sep + '0_iNaturalist-people-post-count-rank-top.pdf')
+    # pio.write_image(fig, 'vis' + os.sep + '0_iNaturalist-people-post-count-rank-top.pdf')
 
     ##################################
     # the power-law plot for all people
@@ -1148,7 +1148,7 @@ if createGeneralVisualizations:
     fig = go.Figure(data=data, layout=layout)
     # fig.update_xaxes(showline=True, linewidth=2, linecolor='black')
     # fig.update_yaxes(showline=True, linewidth=2, linecolor='black')
-    pio.write_image(fig, 'vis' + os.sep + '0_iNaturalist-people-post-count-distribution.pdf')
+    # pio.write_image(fig, 'vis' + os.sep + '0_iNaturalist-people-post-count-distribution.pdf')
 
     ##################################
     # the bar graph of the all people
@@ -1203,7 +1203,7 @@ if createGeneralVisualizations:
         ))'''
     layout['annotations'] = annotations
     fig = go.Figure(data=data, layout=layout)
-    pio.write_image(fig, 'vis' + os.sep + '0_iNaturalist-people-post-count-rank.pdf')
+    # pio.write_image(fig, 'vis' + os.sep + '0_iNaturalist-people-post-count-rank.pdf')
 
 ##################################
 # create person excerpts
@@ -1484,7 +1484,7 @@ if createPersonVisualizationExcerpts:
                 prevDate = date
 
             # place all remaining potentially unplaced markers from the last day
-            if (numberOfObscuredObservations > 0):
+            if (numberOfObscuredObservations > 20):
                 if anchorObscured:
                     additionalHorizontalOffset = markerSize
                 else:
@@ -1563,8 +1563,8 @@ if createPersonVisualizationExcerpts:
             )
             layout['shapes'] = shapeList
 
-            fig = go.Figure(data=data, layout=layout)
-            pio.write_image(fig, 'vis' + os.sep + '0_people-moves-iNaturalist_' + personID + '.pdf')
+            # fig = go.Figure(data=data, layout=layout)
+            # pio.write_image(fig, 'vis' + os.sep + '0_people-moves-iNaturalist_' + personID + '.pdf')
 
             if createPersonVisualizationExcerptsWide:
                 # wide layout for the visualization, make it take less vertical space

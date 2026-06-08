@@ -7,31 +7,161 @@ let appData = {
     obsCoordsMap: {}
 };
 
+let currentDatabase = 'original';
+
+let currentModelSelection = 'static';
+let allAvailableModels = [];
+let originalTransitionsData = {};
+let originalTrajectoriesData = {};
+
+async function loadAvailableModels() {
+    try {
+        const response = await fetch('/api/models');
+        if (response.ok) {
+            allAvailableModels = await response.json();
+        }
+    } catch (e) {
+        console.error("Failed to fetch available models", e);
+    }
+    updateModelDropdown();
+}
+
+function updateModelDropdown() {
+    const modelSelect = document.getElementById('model-select');
+    if (!modelSelect) return;
+    
+    const dbPrefix = currentDatabase === 'original' ? 'inat' : currentDatabase;
+    
+    // Clear and reset to static
+    modelSelect.innerHTML = '<option value="static">Static (Default)</option>';
+    
+    // Track unique model configurations to avoid duplicates
+    const seenModels = new Set();
+    
+    const relevantModels = allAvailableModels.filter(m => m.dataset === dbPrefix);
+    relevantModels.forEach(m => {
+        // Strip the percentile suffix from the model name/ID if it exists, to merge them
+        const configId = m.model_id.replace(/_(90|95|97|99)$/, "");
+        if (seenModels.has(configId)) return;
+        seenModels.add(configId);
+
+        const option = document.createElement('option');
+        option.value = configId;
+        const cleanName = m.name.replace(/_(90|95|97|99)$/, "").replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        option.textContent = cleanName;
+        if (currentModelSelection === configId) option.selected = true;
+        modelSelect.appendChild(option);
+    });
+    
+    const percentileSelect = document.getElementById('percentile-select');
+    if (percentileSelect) {
+        percentileSelect.style.display = (currentModelSelection === 'static') ? 'none' : 'inline-block';
+    }
+}
+
+async function fetchModelScoresForUser(user_id) {
+    if (currentModelSelection === 'static') {
+        // Restore original data
+        appData.transitions_list.forEach(t => {
+            if (originalTransitionsData[t.transition_id] !== undefined) {
+                const orig = originalTransitionsData[t.transition_id];
+                t.is_unplausible = orig.is_unplausible;
+                t.reconstruction_error = orig.mse;
+                t.reconstruction_feature_errors = orig.features;
+                t.plausibility_reason = orig.plausibility_reason;
+            }
+        });
+        appData.trajectories_list.forEach(t => {
+            if (originalTrajectoriesData[t.trajectory_id] !== undefined) {
+                t.is_unplausible = originalTrajectoriesData[t.trajectory_id];
+            }
+        });
+        return;
+    }
+
+    const userTransitions = appData.transitions_list.filter(t => String(t.user_id) === String(user_id));
+    const transIds = userTransitions.map(t => t.transition_id);
+    
+    const userTrajectories = appData.trajectories_list.filter(t => String(t.user_id) === String(user_id));
+    const trajIds = userTrajectories.map(t => t.trajectory_id);
+    
+    if (transIds.length === 0 && trajIds.length === 0) return;
+    
+    const percentileSelect = document.getElementById('percentile-select');
+    const percentileVal = percentileSelect ? parseInt(percentileSelect.value, 10) : 97;
+    
+    try {
+        const response = await fetch('/api/scores', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model_id: currentModelSelection,
+                percentile: percentileVal,
+                transition_ids: transIds,
+                trajectory_ids: trajIds
+            })
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            
+            userTransitions.forEach(t => {
+                if (originalTransitionsData[t.transition_id] === undefined) {
+                    originalTransitionsData[t.transition_id] = {
+                        is_unplausible: t.is_unplausible,
+                        mse: t.reconstruction_error,
+                        features: t.reconstruction_feature_errors,
+                        plausibility_reason: t.plausibility_reason
+                    };
+                }
+                const newScores = data.transitions[t.transition_id];
+                if (newScores) {
+                    t.is_unplausible = newScores.is_unplausible;
+                    t.reconstruction_error = newScores.mse;
+                    t.reconstruction_feature_errors = newScores.features;
+                    t.plausibility_reason = newScores.plausibility_reason;
+                }
+            });
+            
+            userTrajectories.forEach(t => {
+                if (originalTrajectoriesData[t.trajectory_id] === undefined) {
+                    originalTrajectoriesData[t.trajectory_id] = t.is_unplausible;
+                }
+                const newScores = data.trajectories[t.trajectory_id];
+                if (newScores) {
+                    t.is_unplausible = newScores.is_unplausible;
+                }
+            });
+        }
+    } catch (e) {
+        console.error("Failed to fetch model scores", e);
+    }
+}
+
 async function fetchAndParseUsers() {
     try {
-        const [usersRes, transRes, trajRes, obsRes, allObsRes] = await Promise.all([
-            fetch('../Preprocessed_Dataset/users_list.json'),
-            fetch('../Preprocessed_Dataset/transitions_list.json'),
-            fetch('../Preprocessed_Dataset/trajectories_list.json'),
-            fetch('../Preprocessed_Dataset/obscured_observations.json'),
-            fetch('../Preprocessed_Dataset/observations.json')
-        ]);
+        const prefix = currentDatabase === 'gowalla' ? 'gowalla' : (currentDatabase === 'synthetic' ? 'synthetic' : 'inat');
+        const response = await fetch(`/api/users?dataset=${prefix}`);
+        appData.users_list = await response.json();
 
-        appData.users_list = await usersRes.json();
-        appData.transitions_list = await transRes.json();
-        appData.trajectories_list = await trajRes.json();
-        appData.obscured_observations = await obsRes.json();
-        appData.observations = await allObsRes.json();
-
-        for (let obs of appData.observations) {
-            appData.obsCoordsMap[obs.observation_id] = { lat: obs.lat, lon: obs.long };
+        appData.transitions_list = [];
+        appData.trajectories_list = [];
+        appData.observations = [];
+        appData.obsCoordsMap = {};
+        appData.obscured_observations = [];
+        
+        try {
+            const res = await fetch(`../Preprocessed_Dataset/obs_timestamps.json`);
+            appData.obsTimestamps = await res.json();
+        } catch (e) {
+            appData.obsTimestamps = {};
         }
 
         const users = appData.users_list.map(u => String(u.username));
-        console.log(`Found ${users.length} users in JSON.`);
+        console.log(`Found ${users.length} users via API.`);
         return users;
     } catch (error) {
-        console.error('Error fetching JSON data:', error);
+        console.error('Error fetching API users:', error);
         return [];
     }
 }
@@ -54,10 +184,42 @@ document.addEventListener('mouseup', () => {
 });
 
 // Set the map, the timeline and load the pdf files
-function setUser(user_id) {
+async function setUser(user_id) {
     selectedDate = [];
     currentUser = user_id;
     console.log(`Great news ${user_id}`);
+    
+    const prefix = currentDatabase === 'gowalla' ? 'gowalla' : (currentDatabase === 'synthetic' ? 'synthetic' : 'inat');
+    const response = await fetch(`/api/user_data?dataset=${prefix}&user_id=${user_id}`);
+    const data = await response.json();
+    
+    appData.observations = data.observations || [];
+    appData.transitions_list = data.transitions || [];
+    appData.trajectories_list = data.trajectories || [];
+    
+    appData.obsCoordsMap = {};
+    for (let obs of appData.observations) {
+        appData.obsCoordsMap[obs.observation_id] = { lat: obs.lat, lon: obs.lon };
+    }
+    
+    originalTransitionsData = {};
+    originalTrajectoriesData = {};
+    
+    appData.transitions_list.forEach(t => {
+        originalTransitionsData[t.transition_id] = {
+            is_unplausible: t.transition_plausibility !== undefined ? t.transition_plausibility === 0 : false,
+            mse: 0.0,
+            features: [0,0,0,0,0,0],
+            plausibility_reason: t.plausibility_reason
+        };
+    });
+    
+    appData.trajectories_list.forEach(t => {
+        originalTrajectoriesData[t.trajectory_id] = false;
+    });
+
+    await fetchModelScoresForUser(user_id);
+    
     setTimeline(user_id);
     renderPlotlyProfile(user_id);
 }
@@ -235,6 +397,7 @@ async function renderPlotlyProfile(user_id) {
                 // Tag with transition_id and also second observation_id
                 shapeIndexMap['trans_' + String(t.transition_id)] = tShapeIdx;
                 shapeIndexMap['obs_' + String(t.observation_id2)] = tShapeIdx;
+                const isUnplausible = t.is_unplausible === true;
                 shapeList.push({
                     type: "circle",
                     xsizemode: 'pixel', ysizemode: 'pixel',
@@ -242,8 +405,9 @@ async function renderPlotlyProfile(user_id) {
                     yanchor: dataEntryCounter,
                     x0: markerSize * 0.5 + horizontalOffset, y0: -markerSize * 0.5,
                     x1: markerSize * 1.5 + horizontalOffset, y1: markerSize * 0.5,
-                    line: { width: 0 },
-                    fillcolor: fillcolorBySpeed
+                    line: isUnplausible ? { color: '#ff4d4f', width: 2.5 } : { width: 0 },
+                    fillcolor: fillcolorBySpeed,
+                    isUnplausible: isUnplausible
                 });
                 horizontalOffset += markerSize;
             }
@@ -286,7 +450,7 @@ async function renderPlotlyProfile(user_id) {
             shapes: shapeList
         };
 
-        Plotly.newPlot('mppPlotly', dummyData, layout, { responsive: true });
+        Plotly.newPlot('mppPlotly', dummyData, layout, { responsive: true, scrollZoom: true });
 
         document.getElementById('mppPlotly').on('plotly_click', function (data) {
             if (data.points && data.points.length > 0) {
@@ -327,13 +491,21 @@ function highlightPlotlyDay(user_id, dates) {
 
     // Create a new array of shapes to trigger relayout
     const updatedShapes = shapes.map(shape => {
-        if (formattedDates.includes(shape.xanchor)) {
+        if (formattedDates.length === 0) {
+            return shape; // Return to initial state
+        } else if (formattedDates.includes(shape.xanchor)) {
+            let border = { width: 0 };
+            if (shape.fillcolor === 'white' || shape.fillcolor === 'rgb(255,255,255)') {
+                border = { ...shape.line, color: 'black', width: 2 };
+            } else if (shape.isUnplausible) {
+                border = { color: '#ff4d4f', width: 2.5 };
+            } else {
+                border = { color: 'rgb(50,50,50)', width: 2 };
+            }
             return {
                 ...shape,
                 opacity: 1,
-                line: shape.fillcolor === 'white' || shape.fillcolor === 'rgb(255,255,255)'
-                    ? { ...shape.line, color: 'black', width: 2 }
-                    : { color: 'rgb(50,50,50)', width: 2 }
+                line: border
             };
         } else {
             return { ...shape, opacity: 0.15 };
@@ -366,6 +538,8 @@ function highlightProfileShape(shapeIdx) {
         // Add highlight ring on the hovered shape
         if (idx === shapeIdx) {
             s.line = { color: 'rgba(255, 0, 0, 1)', width: 3 };
+        } else if (s.isUnplausible) {
+            s.line = { color: '#ff4d4f', width: 2.5 };
         }
         return s;
     });
@@ -430,8 +604,10 @@ async function updateMapForDate(user_id, dates) {
             let p2 = appData.obsCoordsMap[id2];
 
             if (p1 && !addedPoints.has(t.observation_id1)) {
+                let time1 = appData.obsTimestamps ? (appData.obsTimestamps[t.observation_id1] || "") : "";
+                if (time1) time1 = ` ${time1}`;
                 const marker = L.marker([p1.lat, p1.lon], { icon: circleIcon }).addTo(leafletMap);
-                marker.bindTooltip(`<b>ID:</b> ${t.observation_id1}<br><b>Lat:</b> ${p1.lat.toFixed(5)}<br><b>Lon:</b> ${p1.lon.toFixed(5)}<br><b>Date:</b> ${t.date}`);
+                marker.bindTooltip(`<b>ID:</b> ${t.observation_id1}<br><b>Lat:</b> ${p1.lat.toFixed(5)}<br><b>Lon:</b> ${p1.lon.toFixed(5)}<br><b>Date:</b> ${t.date}${time1}`);
                 // Highlight the corresponding profile shape on hover
                 const obsKey1 = 'obs_' + String(t.observation_id1);
                 marker.on('mouseover', () => { if (shapeIndexMap[obsKey1] !== undefined) highlightProfileShape(shapeIndexMap[obsKey1]); });
@@ -441,8 +617,10 @@ async function updateMapForDate(user_id, dates) {
                 addedPoints.add(t.observation_id1);
             }
             if (p2 && !addedPoints.has(t.observation_id2)) {
+                let time2 = appData.obsTimestamps ? (appData.obsTimestamps[t.observation_id2] || "") : "";
+                if (time2) time2 = ` ${time2}`;
                 const marker = L.marker([p2.lat, p2.lon], { icon: circleIcon }).addTo(leafletMap);
-                marker.bindTooltip(`<b>ID:</b> ${t.observation_id2}<br><b>Lat:</b> ${p2.lat.toFixed(5)}<br><b>Lon:</b> ${p2.lon.toFixed(5)}<br><b>Date:</b> ${t.date}`);
+                marker.bindTooltip(`<b>ID:</b> ${t.observation_id2}<br><b>Lat:</b> ${p2.lat.toFixed(5)}<br><b>Lon:</b> ${p2.lon.toFixed(5)}<br><b>Date:</b> ${t.date}${time2}`);
                 const obsKey2 = 'obs_' + String(t.observation_id2);
                 marker.on('mouseover', () => { if (shapeIndexMap[obsKey2] !== undefined) highlightProfileShape(shapeIndexMap[obsKey2]); });
                 marker.on('mouseout', clearProfileHighlight);
@@ -456,8 +634,10 @@ async function updateMapForDate(user_id, dates) {
         for (let o of isolatedObs) {
             let p1 = { lat: o.lat, lon: o.long };
             if (!addedPoints.has(String(o.observation_id))) {
+                let timeO = appData.obsTimestamps ? (appData.obsTimestamps[o.observation_id] || "") : "";
+                if (timeO) timeO = ` ${timeO}`;
                 const marker = L.marker([p1.lat, p1.lon], { icon: circleIcon }).addTo(leafletMap);
-                marker.bindTooltip(`<b>ID:</b> ${o.observation_id}<br><b>Lat:</b> ${p1.lat.toFixed(5)}<br><b>Lon:</b> ${p1.lon.toFixed(5)}<br><b>Date:</b> ${o.date}`);
+                marker.bindTooltip(`<b>ID:</b> ${o.observation_id}<br><b>Lat:</b> ${p1.lat.toFixed(5)}<br><b>Lon:</b> ${p1.lon.toFixed(5)}<br><b>Date:</b> ${o.date}${timeO}`);
                 const obsKey = 'obs_' + String(o.observation_id);
                 marker.on('mouseover', () => { if (shapeIndexMap[obsKey] !== undefined) highlightProfileShape(shapeIndexMap[obsKey]); });
                 marker.on('mouseout', clearProfileHighlight);
@@ -483,18 +663,34 @@ async function updateMapForDate(user_id, dates) {
 
             let color = getSpeedColor(t.speed + " km/h");
 
+            const isUnplausible = t.is_unplausible === true;
             const polyline = L.polyline([[p1.lat, p1.lon], [p2.lat, p2.lon]], {
-                color: color,
-                weight: 4,
-                opacity: 0.8
+                color: isUnplausible ? '#ff4d4f' : color,
+                weight: isUnplausible ? 6 : 4,
+                opacity: 0.9,
+                dashArray: isUnplausible ? '5, 5' : null
             }).addTo(leafletMap);
 
-            let transInfo = `<b>Speed:</b> ${parseFloat(t.speed).toFixed(2)} km/h<br><b>Distance:</b> ${parseFloat(t.distance).toFixed(2)} m<br><b>Elapsed Time:</b> ${parseFloat(t.elapsed_time).toFixed(0)} s`;
+            let transInfo = `<b>Speed:</b> ${parseFloat(t.speed).toFixed(2)} km/h<br><b>Distance:</b> ${parseFloat(t.distance).toFixed(2)} m<br><b>Elapsed Time:</b> ${parseFloat(t.elapsed_time).toFixed(0)} s<br><b>Plausibility:</b> ${parseFloat(t.transition_plausibility).toFixed(0)}`;
             if (t.acceleration !== undefined) {
                 transInfo += `<br><b>Acceleration:</b> ${parseFloat(t.acceleration).toFixed(4)} m/s²`;
             }
             if (t.bearing_change !== undefined) {
-                transInfo += `<br><b>Bearing Change:</b> ${parseFloat(t.bearing_change).toFixed(2)}°`;
+                transInfo += `<br><b>Bearing Change:</b> ${parseFloat(t.bearing_change).toFixed(2)}rad`;
+            }
+            if (t.is_unplausible !== undefined) {
+                transInfo += `<br><b>Unplausible (LSTM):</b> ${t.is_unplausible ? '<span style="color:red; font-weight:bold;">Yes (Least Plausible)</span>' : 'No'}`;
+                transInfo += `<br><b>LSTM Error:</b> ${parseFloat(t.reconstruction_error).toFixed(4)}`;
+                if (t.reconstruction_feature_errors && t.reconstruction_error > 0) {
+                    const fErr = t.reconstruction_feature_errors;
+                    transInfo += `<br><b>Feature Errors:</b>`;
+                    transInfo += `<br>&nbsp;&nbsp;Speed: ${parseFloat(fErr[0]).toFixed(4)}`;
+                    transInfo += `<br>&nbsp;&nbsp;Time: ${parseFloat(fErr[1]).toFixed(4)}`;
+                    transInfo += `<br>&nbsp;&nbsp;Dist: ${parseFloat(fErr[2]).toFixed(4)}`;
+                    transInfo += `<br>&nbsp;&nbsp;Accel: ${parseFloat(fErr[3]).toFixed(4)}`;
+                    transInfo += `<br>&nbsp;&nbsp;Bear(sin): ${parseFloat(fErr[4]).toFixed(4)}`;
+                    transInfo += `<br>&nbsp;&nbsp;Bear(cos): ${parseFloat(fErr[5]).toFixed(4)}`;
+                }
             }
             // sticky: true makes the tooltip follow the mouse along the polyline
             polyline.bindTooltip(transInfo, { sticky: true });
@@ -516,7 +712,7 @@ async function updateMapForDate(user_id, dates) {
                 html: `
                     <div style="width: 20px; height: 20px; transform: rotate(${angle}deg);">
                         <svg viewBox="0 0 24 24" width="20" height="20" style="overflow: visible;">
-                            <polygon points="4,4 20,12 4,20" fill="${color}" stroke="white" stroke-width="2" />
+                            <polygon points="4,4 20,12 4,20" fill="${isUnplausible ? '#ff4d4f' : color}" stroke="white" stroke-width="2" />
                         </svg>
                     </div>
                 `,
@@ -667,6 +863,17 @@ function renderTimeline() {
         li.className = 'timeline-day';
         li.textContent = token.label;
 
+        // Check if any trajectory for currentUser in this token is unplausible
+        const isDayUnplausible = appData.trajectories_list.some(traj => {
+            return String(traj.user_id) === String(currentUser) && 
+                   traj.is_unplausible === true && 
+                   token.days.includes(traj.date.trim());
+        });
+
+        if (isDayUnplausible) {
+            li.classList.add('unplausible');
+        }
+
         const isFullySelected = token.days.length > 0 && token.days.every(d => selectedDate.includes(d));
         if (isFullySelected) {
             li.classList.add('selected');
@@ -807,9 +1014,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
-    // 1. Fetch the user list and stats
-    const users = await fetchAndParseUsers();
-
     let usernames = {};
     try {
         const statsResponse = await fetch('ressources/usernames.json');
@@ -818,7 +1022,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     } catch (e) { console.warn("Could not load usernames"); }
 
-    // 2. Identify the select element
     const selectElement = document.getElementById('user-select');
     if (!selectElement) {
         console.warn('Could not find the element with ID "user-select"');
@@ -827,44 +1030,106 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Add a 'change' event listener to the <select> element itself
     selectElement.addEventListener('change', (event) => {
-        // event.target.value contains the value of the selected option
         const selectedUserId = event.target.value;
         if (selectedUserId) {
-            setUser(selectedUserId); // Pass the selected user to your function
+            setUser(selectedUserId); 
         }
     });
 
-    // Create a dictionary of user counts for fast lookup
-    let userCounts = {};
-    if (appData && appData.users_list) {
-        for (const u of appData.users_list) {
-            userCounts[String(u.username)] = u.nb_observations || 0;
+    async function initializeDataset() {
+        // Clear UI state
+        currentUser = null;
+        selectedDate = [];
+        originalTransitionsData = {};
+        originalTrajectoriesData = {};
+        if (leafletMap) {
+            currentMarkers.forEach(m => leafletMap.removeLayer(m));
+            currentMarkers = [];
+            if (window.routePolyline) leafletMap.removeLayer(window.routePolyline);
         }
+        document.getElementById('timeline').innerHTML = '';
+        Plotly.purge('mppPlotly');
+        
+        selectElement.innerHTML = '<option value="">--Please choose a user--</option>';
+
+        const users = await fetchAndParseUsers();
+        
+        let userCounts = {};
+        if (appData && appData.users_list) {
+            for (const u of appData.users_list) {
+                userCounts[String(u.username)] = u.nb_observations || 0;
+            }
+        }
+
+        users.sort((a, b) => {
+            const countA = userCounts[a] || 0;
+            const countB = userCounts[b] || 0;
+            return countB - countA;
+        });
+
+        const topUsers = users.slice(0, 20000);
+        const fragment = document.createDocumentFragment();
+
+        for (const user of topUsers) {
+            const option = document.createElement('option');
+            option.value = user;
+            // For Gowalla, there are no usernames, just user IDs. We check currentDatabase.
+            const uname = (currentDatabase === 'original' && usernames[user]) ? usernames[user] :
+                          (currentDatabase === 'synthetic' ? user.replace(/_/g, ' ') : `User ${user}`);
+            const count = userCounts[user] || 0;
+            option.textContent = `${uname} (${count} obs)`;
+            fragment.appendChild(option);
+        }
+        selectElement.appendChild(fragment);
     }
 
-    // Sort users by count descending
-    users.sort((a, b) => {
-        const countA = userCounts[a] || 0;
-        const countB = userCounts[b] || 0;
-        return countB - countA;
+    const databaseSelect = document.getElementById('database-select');
+    if (databaseSelect) {
+        databaseSelect.addEventListener('change', (e) => {
+            currentDatabase = e.target.value;
+            currentModelSelection = 'static';
+            updateModelDropdown();
+            initializeDataset();
+        });
+    }
+
+    const modelSelect = document.getElementById('model-select');
+    if (modelSelect) {
+        modelSelect.addEventListener('change', async (e) => {
+            currentModelSelection = e.target.value;
+            const percentileSelect = document.getElementById('percentile-select');
+            if (percentileSelect) {
+                percentileSelect.style.display = (currentModelSelection === 'static') ? 'none' : 'inline-block';
+            }
+            if (currentUser) {
+                await fetchModelScoresForUser(currentUser);
+                setTimeline(currentUser);
+                renderPlotlyProfile(currentUser);
+                if (selectedDate.length > 0) {
+                    updateMapForDate(currentUser, selectedDate);
+                }
+            }
+        });
+    }
+
+    const percentileSelect = document.getElementById('percentile-select');
+    if (percentileSelect) {
+        percentileSelect.addEventListener('change', async (e) => {
+            if (currentUser) {
+                await fetchModelScoresForUser(currentUser);
+                setTimeline(currentUser);
+                renderPlotlyProfile(currentUser);
+                if (selectedDate.length > 0) {
+                    updateMapForDate(currentUser, selectedDate);
+                }
+            }
+        });
+    }
+
+    // Initial load
+    loadAvailableModels().then(() => {
+        initializeDataset();
     });
-
-    // Take top 1000 users to prevent native dropdown lag
-    const topUsers = users.slice(0, 20000);
-
-    // Create a document fragment to append options rapidly
-    const fragment = document.createDocumentFragment();
-
-    // Append each user as a new <option>
-    for (const user of topUsers) {
-        const option = document.createElement('option');
-        option.value = user;
-        const uname = usernames[user] || "Unknown";
-        const count = userCounts[user] || 0;
-        option.textContent = `${uname} (${count} obs)`;
-        fragment.appendChild(option);
-    }
-    selectElement.appendChild(fragment);
 });
 
 function toggleProfile() {
