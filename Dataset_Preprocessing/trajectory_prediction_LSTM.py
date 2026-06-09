@@ -627,11 +627,6 @@ def train_evaluate_model(
         # We need to write gowalla_ids_data somewhere or load it if we modified it? Wait, gowalla_ids is already passed from datasets
         analyze_anomalies(gowalla_out, gowalla_unnormalized_trips, os.path.join(base_dir, "gowalla_trajectories_id.pkl"), anomaly_percentile, verbose=verbose)
         
-        # Evaluate synthetic anomalies
-        from generate_synthetic_anomalies import run_synthetic_evaluation
-        run_synthetic_evaluation(model_save_path, gowalla_out, inat_out, model_name, feature_indices)
-
-        
     return model
 
 if __name__ == "__main__":

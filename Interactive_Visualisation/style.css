@@ -244,6 +244,84 @@ h1 {
     align-items: center;
 }
 
+#threshold-control {
+    min-width: 155px;
+    display: grid;
+    gap: 2px;
+    font-family: sans-serif;
+    font-size: 11px;
+}
+
+#threshold-control label {
+    display: flex;
+    justify-content: space-between;
+}
+
+#threshold-slider {
+    width: 100%;
+    accent-color: #dc3545;
+}
+
+#threshold-value {
+    color: #555;
+    font-variant-numeric: tabular-nums;
+}
+
+#model-info-button {
+    width: 30px;
+    height: 30px;
+    border: 0;
+    border-radius: 50%;
+    background: #333;
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+#model-info-panel {
+    position: absolute;
+    z-index: 1200;
+    top: 72px;
+    right: 3%;
+    width: 330px;
+    max-height: calc(100vh - 150px);
+    overflow: auto;
+    padding: 18px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.97);
+    box-shadow: 0 5px 20px rgba(0, 0, 0, 0.3);
+    font-family: sans-serif;
+    font-size: 12px;
+}
+
+#model-info-panel h2 {
+    margin: 0 0 12px;
+    font-size: 16px;
+}
+
+#model-info-panel dl {
+    display: grid;
+    grid-template-columns: 95px 1fr;
+    gap: 7px;
+}
+
+#model-info-panel dt {
+    color: #666;
+}
+
+#model-info-panel dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+#close-model-info {
+    float: right;
+    border: 0;
+    background: transparent;
+    font-size: 22px;
+    cursor: pointer;
+}
+
 /* Hide arrows when zoomed out to improve performance */
 .hide-arrows .custom-arrow-icon {
     display: none !important;

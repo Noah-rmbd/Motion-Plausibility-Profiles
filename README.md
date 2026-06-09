@@ -73,11 +73,12 @@ Note that it is normal to see many lines along the lines of ```No genus name for
 ## Running the interactive visualisation
 Once you ran the script (which can take some time depending on the size of your dataset), you can open the interactive visualisation of the dataset.
 ```
-python3 open_visualization.py
+python build_database.py
+python open_visualization.py
 ```
 Then you can open in your browser the following url :
 ```
-http://localhost:8000/main.html
+http://127.0.0.1:8001
 ```
 
 ## Files produced

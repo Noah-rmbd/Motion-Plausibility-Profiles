@@ -9,8 +9,9 @@ let appData = {
 
 let currentDatabase = 'original';
 
-let currentModelSelection = 'static';
+let currentModelSelection = '';
 let allAvailableModels = [];
+let currentThreshold = Infinity;
 let originalTransitionsData = {};
 let originalTrajectoriesData = {};
 
@@ -32,52 +33,22 @@ function updateModelDropdown() {
     
     const dbPrefix = currentDatabase === 'original' ? 'inat' : currentDatabase;
     
-    // Clear and reset to static
-    modelSelect.innerHTML = '<option value="static">Static (Default)</option>';
-    
-    // Track unique model configurations to avoid duplicates
-    const seenModels = new Set();
-    
-    const relevantModels = allAvailableModels.filter(m => m.dataset === dbPrefix);
+    modelSelect.innerHTML = '';
+    const relevantModels = allAvailableModels.filter(m =>
+        m.datasets.some(dataset => dataset.dataset === dbPrefix)
+    );
     relevantModels.forEach(m => {
-        // Strip the percentile suffix from the model name/ID if it exists, to merge them
-        const configId = m.model_id.replace(/_(90|95|97|99)$/, "");
-        if (seenModels.has(configId)) return;
-        seenModels.add(configId);
-
         const option = document.createElement('option');
-        option.value = configId;
-        const cleanName = m.name.replace(/_(90|95|97|99)$/, "").replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-        option.textContent = cleanName;
-        if (currentModelSelection === configId) option.selected = true;
+        option.value = m.model_id;
+        option.textContent = `${m.features.length} features · ${m.training.epochs} epochs`;
         modelSelect.appendChild(option);
     });
-    
-    const percentileSelect = document.getElementById('percentile-select');
-    if (percentileSelect) {
-        percentileSelect.style.display = (currentModelSelection === 'static') ? 'none' : 'inline-block';
-    }
+    currentModelSelection = modelSelect.value;
+    updateModelInformation();
 }
 
 async function fetchModelScoresForUser(user_id) {
-    if (currentModelSelection === 'static') {
-        // Restore original data
-        appData.transitions_list.forEach(t => {
-            if (originalTransitionsData[t.transition_id] !== undefined) {
-                const orig = originalTransitionsData[t.transition_id];
-                t.is_unplausible = orig.is_unplausible;
-                t.reconstruction_error = orig.mse;
-                t.reconstruction_feature_errors = orig.features;
-                t.plausibility_reason = orig.plausibility_reason;
-            }
-        });
-        appData.trajectories_list.forEach(t => {
-            if (originalTrajectoriesData[t.trajectory_id] !== undefined) {
-                t.is_unplausible = originalTrajectoriesData[t.trajectory_id];
-            }
-        });
-        return;
-    }
+    if (!currentModelSelection) return;
 
     const userTransitions = appData.transitions_list.filter(t => String(t.user_id) === String(user_id));
     const transIds = userTransitions.map(t => t.transition_id);
@@ -87,8 +58,7 @@ async function fetchModelScoresForUser(user_id) {
     
     if (transIds.length === 0 && trajIds.length === 0) return;
     
-    const percentileSelect = document.getElementById('percentile-select');
-    const percentileVal = percentileSelect ? parseInt(percentileSelect.value, 10) : 97;
+    const anomalyPercentage = parseFloat(document.getElementById('threshold-slider').value);
     
     try {
         const response = await fetch('/api/scores', {
@@ -96,7 +66,8 @@ async function fetchModelScoresForUser(user_id) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 model_id: currentModelSelection,
-                percentile: percentileVal,
+                dataset: currentDatabase === 'original' ? 'inat' : currentDatabase,
+                anomaly_percentage: anomalyPercentage,
                 transition_ids: transIds,
                 trajectory_ids: trajIds
             })
@@ -104,6 +75,8 @@ async function fetchModelScoresForUser(user_id) {
         
         if (response.ok) {
             const data = await response.json();
+            currentThreshold = data.threshold;
+            document.getElementById('threshold-value').textContent = `Threshold: ${formatModelScore(currentThreshold)}`;
             
             userTransitions.forEach(t => {
                 if (originalTransitionsData[t.transition_id] === undefined) {
@@ -118,7 +91,18 @@ async function fetchModelScoresForUser(user_id) {
                 if (newScores) {
                     t.is_unplausible = newScores.is_unplausible;
                     t.reconstruction_error = newScores.mse;
-                    t.reconstruction_feature_errors = newScores.features;
+                    const featureMap = {};
+                    (newScores.feature_names || []).forEach((name, index) => {
+                        featureMap[name] = newScores.features[index];
+                    });
+                    t.reconstruction_feature_errors = [
+                        featureMap.speed || 0,
+                        featureMap.elapsed_time || 0,
+                        featureMap.distance || 0,
+                        featureMap.acceleration || 0,
+                        featureMap.bearing_sin || 0,
+                        featureMap.bearing_cos || 0
+                    ];
                     t.plausibility_reason = newScores.plausibility_reason;
                 }
             });
@@ -149,13 +133,7 @@ async function fetchAndParseUsers() {
         appData.observations = [];
         appData.obsCoordsMap = {};
         appData.obscured_observations = [];
-        
-        try {
-            const res = await fetch(`../Preprocessed_Dataset/obs_timestamps.json`);
-            appData.obsTimestamps = await res.json();
-        } catch (e) {
-            appData.obsTimestamps = {};
-        }
+        appData.obsTimestamps = {};
 
         const users = appData.users_list.map(u => String(u.username));
         console.log(`Found ${users.length} users via API.`);
@@ -196,10 +174,13 @@ async function setUser(user_id) {
     appData.observations = data.observations || [];
     appData.transitions_list = data.transitions || [];
     appData.trajectories_list = data.trajectories || [];
+    appData.obscured_observations = data.obscured_observations || [];
     
     appData.obsCoordsMap = {};
     for (let obs of appData.observations) {
         appData.obsCoordsMap[obs.observation_id] = { lat: obs.lat, lon: obs.lon };
+        appData.obsCoordsMap[String(obs.observation_id).replace('iN-p', '').replace('iN-o', '')] = { lat: obs.lat, lon: obs.lon };
+        appData.obsTimestamps[obs.observation_id] = String(obs.date || '').substring(11);
     }
     
     originalTransitionsData = {};
@@ -220,8 +201,13 @@ async function setUser(user_id) {
 
     await fetchModelScoresForUser(user_id);
     
-    setTimeline(user_id);
+    await setTimeline(user_id);
     renderPlotlyProfile(user_id);
+    if (globalDaysArray.length > 0) {
+        selectedDate = [globalDaysArray[0]];
+        renderTimeline();
+        await updateMapForDate(user_id, selectedDate);
+    }
 }
 
 
@@ -268,6 +254,32 @@ function getSpeedColor(speedStr) {
 // Function for async sleep
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+function formatModelScore(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return '--';
+    return number >= 0.01 ? number.toFixed(4) : number.toExponential(2);
+}
+
+function updateModelInformation() {
+    const model = allAvailableModels.find(item => item.model_id === currentModelSelection);
+    const content = document.getElementById('model-info-content');
+    if (!model || !content) return;
+    const metrics = model.synthetic_metrics;
+    content.innerHTML = `
+        <dl>
+            <dt>Identifier</dt><dd>${model.model_id}</dd>
+            <dt>Type</dt><dd>${model.model_type.replace(/_/g, ' ')}</dd>
+            <dt>Feature set</dt><dd>${model.feature_set}</dd>
+            <dt>Features</dt><dd>${model.features.join(', ')}</dd>
+            <dt>Architecture</dt><dd>${Object.entries(model.architecture).map(([key, value]) => `${key}: ${value}`).join(', ')}</dd>
+            <dt>Training data</dt><dd>${model.training.datasets.join(' + ')}</dd>
+            <dt>Epochs</dt><dd>${model.training.epochs}</dd>
+            <dt>Batch size</dt><dd>${model.training.batch_size}</dd>
+            <dt>Final loss</dt><dd>${formatModelScore(model.final_loss)}</dd>
+            <dt>Synthetic AUC</dt><dd>${metrics ? Number(metrics.roc_auc).toFixed(3) : '--'}</dd>
+        </dl>`;
+}
+
 
 
 let plotlyShapesCache = {};
@@ -284,8 +296,8 @@ async function renderPlotlyProfile(user_id) {
 
         let transitionObsIds = new Set();
         for (let t of userTransitions) {
-            transitionObsIds.add(String(t.observation_id1).replace('iN-p', '').replace('iN-o', ''));
-            transitionObsIds.add(String(t.observation_id2).replace('iN-p', '').replace('iN-o', ''));
+            transitionObsIds.add(String(t.observation_id1));
+            transitionObsIds.add(String(t.observation_id2));
         }
         let isolatedObs = userObservations.filter(o => !transitionObsIds.has(String(o.observation_id)));
 
@@ -930,10 +942,6 @@ async function loadObservationsList() {
 
 // Automatically load and populate the user-select dropdown when the page loads
 document.addEventListener('DOMContentLoaded', async () => {
-    // Load available observation datasets into JS scope
-    const availableCsvFiles = await loadObservationsList();
-    console.log(`Les fichiers ${availableCsvFiles}`, availableCsvFiles);
-
     // 0. Initialize the Map
     leafletMap = L.map('map').setView([0, 0], 2); // Default to a global view
 
@@ -1087,7 +1095,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (databaseSelect) {
         databaseSelect.addEventListener('change', (e) => {
             currentDatabase = e.target.value;
-            currentModelSelection = 'static';
             updateModelDropdown();
             initializeDataset();
         });
@@ -1097,10 +1104,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (modelSelect) {
         modelSelect.addEventListener('change', async (e) => {
             currentModelSelection = e.target.value;
-            const percentileSelect = document.getElementById('percentile-select');
-            if (percentileSelect) {
-                percentileSelect.style.display = (currentModelSelection === 'static') ? 'none' : 'inline-block';
-            }
+            updateModelInformation();
             if (currentUser) {
                 await fetchModelScoresForUser(currentUser);
                 setTimeline(currentUser);
@@ -1112,9 +1116,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
-    const percentileSelect = document.getElementById('percentile-select');
-    if (percentileSelect) {
-        percentileSelect.addEventListener('change', async (e) => {
+    const thresholdSlider = document.getElementById('threshold-slider');
+    if (thresholdSlider) {
+        let thresholdTimer = null;
+        thresholdSlider.addEventListener('input', async (e) => {
+            document.getElementById('threshold-percentage').textContent = `${parseFloat(e.target.value).toFixed(1)}%`;
+            clearTimeout(thresholdTimer);
+            thresholdTimer = setTimeout(async () => {
             if (currentUser) {
                 await fetchModelScoresForUser(currentUser);
                 setTimeline(currentUser);
@@ -1123,12 +1131,36 @@ document.addEventListener('DOMContentLoaded', async () => {
                     updateMapForDate(currentUser, selectedDate);
                 }
             }
+            }, 100);
         });
     }
 
-    // Initial load
-    loadAvailableModels().then(() => {
-        initializeDataset();
+    const modelInfoButton = document.getElementById('model-info-button');
+    const modelInfoPanel = document.getElementById('model-info-panel');
+    const closeModelInfo = document.getElementById('close-model-info');
+    modelInfoButton.addEventListener('click', () => {
+        updateModelInformation();
+        modelInfoPanel.hidden = !modelInfoPanel.hidden;
+    });
+    closeModelInfo.addEventListener('click', () => {
+        modelInfoPanel.hidden = true;
+    });
+
+    // Initial load. Query parameters are also useful for reproducible visual checks.
+    loadAvailableModels().then(async () => {
+        const params = new URLSearchParams(window.location.search);
+        const requestedDataset = params.get('dataset');
+        const requestedUser = params.get('user');
+        if (requestedDataset) {
+            currentDatabase = requestedDataset === 'inat' ? 'original' : requestedDataset;
+            databaseSelect.value = currentDatabase;
+            updateModelDropdown();
+        }
+        await initializeDataset();
+        if (requestedUser) {
+            selectElement.value = requestedUser;
+            if (selectElement.value) await setUser(requestedUser);
+        }
     });
 });
 
