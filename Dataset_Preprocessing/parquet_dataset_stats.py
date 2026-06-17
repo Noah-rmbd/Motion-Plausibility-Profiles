@@ -20,7 +20,7 @@ METRICS = {
 }
 
 QUANTILES = [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]
-DEFAULT_DATASETS = ["inat", "gowalla"]
+DEFAULT_DATASETS = ["inat", "gowalla", "diverse"]
 
 
 def numeric_summary(series):
@@ -73,7 +73,44 @@ def read_dataset(processed_dir, dataset):
     )
     trajectory_transitions = pd.read_parquet(
         base / "trajectory_transitions.parquet",
-        columns=["trajectory_id", "transition_id"],
+        columns=["trajectory_id", "transition_order", "transition_id"],
+    )
+    validity = trajectory_transitions.merge(
+        transitions[["transition_id", "elapsed_time_s", "distance_m"]],
+        on="transition_id",
+        how="left",
+        validate="one_to_one",
+    ).sort_values(["trajectory_id", "transition_order"])
+    if "acceleration_valid" not in transitions:
+        transitions["acceleration_valid"] = False
+    if "bearing_change_valid" not in transitions:
+        transitions["bearing_change_valid"] = False
+    derived_acceleration_valid = (
+        validity["transition_order"].gt(0) & validity["elapsed_time_s"].gt(0)
+    )
+    previous_moving = validity.groupby("trajectory_id", sort=False)["distance_m"].shift().gt(1e-3)
+    derived_bearing_valid = validity["distance_m"].gt(1e-3) & previous_moving
+    validity["derived_acceleration_valid"] = derived_acceleration_valid
+    validity["derived_bearing_valid"] = derived_bearing_valid
+    transitions = transitions.drop(
+        columns=["acceleration_valid", "bearing_change_valid"],
+        errors="ignore",
+    ).merge(
+        validity[
+            [
+                "transition_id",
+                "derived_acceleration_valid",
+                "derived_bearing_valid",
+            ]
+        ],
+        on="transition_id",
+        how="left",
+        validate="one_to_one",
+    ).rename(
+        columns={
+            "derived_acceleration_valid": "acceleration_valid",
+            "derived_bearing_valid": "bearing_change_valid",
+        }
     )
     return transitions, trajectories, trajectory_transitions
 
@@ -109,14 +146,30 @@ def describe_subset(dataset, subset_name, transitions, trajectories, output_dir,
         "n_trajectories": int(len(trajectories)),
         "transition_metrics": {},
         "trajectory_n_transitions": numeric_summary(trajectories["n_transitions"]),
+        "data_quality": {
+            "undefined_acceleration": int((~transitions["acceleration_valid"]).sum()),
+            "undefined_bearing_change": int((~transitions["bearing_change_valid"]).sum()),
+            "stationary_nonzero_bearing_change": int(
+                (
+                    transitions["distance_m"].le(1e-3)
+                    & transitions["bearing_change_rad"].abs().gt(1e-12)
+                ).sum()
+            ),
+            "zero_elapsed_time": int(transitions["elapsed_time_s"].le(0).sum()),
+        },
     }
 
     histogram_dir = Path(output_dir) / "histograms"
     histogram_dir.mkdir(parents=True, exist_ok=True)
 
     for column, metric_name in METRICS.items():
-        subset_summary["transition_metrics"][metric_name] = numeric_summary(transitions[column])
-        histogram(transitions[column], bins).to_csv(
+        metric_values = transitions[column]
+        if column == "acceleration_m_s2":
+            metric_values = metric_values.loc[transitions["acceleration_valid"]]
+        elif column == "bearing_change_rad":
+            metric_values = metric_values.loc[transitions["bearing_change_valid"]]
+        subset_summary["transition_metrics"][metric_name] = numeric_summary(metric_values)
+        histogram(metric_values, bins).to_csv(
             histogram_dir / f"{dataset}_{subset_name}_{metric_name}.csv",
             index=False,
         )

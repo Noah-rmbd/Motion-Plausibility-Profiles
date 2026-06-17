@@ -5,9 +5,16 @@ from copy import deepcopy
 from pathlib import Path
 
 from modeling.config import load_config, write_config
-from modeling.models import LSTMAutoencoderPlugin  # noqa: F401
+from modeling.models import (  # noqa: F401
+    LAGMMPlugin,
+    LSTMAutoencoderPlugin,
+    LSTMForecasterPlugin,
+    LSTMSeq2SeqAutoencoderPlugin,
+    TLSTMAutoencoderPlugin,
+    TLSTMSeq2SeqAutoencoderPlugin,
+)
 from modeling.registry import create_model_plugin
-from modeling.synthetic_evaluation import evaluate_synthetic_predictions
+from modeling.synthetic_evaluation import default_anomaly_percentages, evaluate_synthetic_predictions
 
 
 def run_benchmark(config_path, feature_root, model_root, prediction_root):
@@ -52,7 +59,11 @@ def run_benchmark(config_path, feature_root, model_root, prediction_root):
                 reference_datasets=reference_datasets,
                 anomaly_percentages=benchmark.get(
                     "anomaly_percentages",
-                    [1.0, 5.0, 10.0],
+                    default_anomaly_percentages(),
+                ),
+                ignore_first_transition=config["evaluation"].get(
+                    "ignore_first_transition",
+                    True,
                 ),
             )
         results.append(result)

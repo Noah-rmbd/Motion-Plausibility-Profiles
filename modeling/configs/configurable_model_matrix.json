@@ -1,0 +1,90 @@
+{
+  "base_config": null,
+  "reference_datasets": ["inat", "gowalla"],
+  "matrix": {
+    "model_id_prefix": "v2",
+    "comparison_group": "configurable_pipeline_v3",
+    "epochs": 15,
+    "evaluation_datasets": ["inat", "gowalla", "synthetic"],
+    "architectures": [
+      {
+        "id": "lstm_ae",
+        "model_type": "lstm_autoencoder"
+      },
+      {
+        "id": "lstm_forecaster",
+        "model_id_prefix": "v4",
+        "model_type": "lstm_forecaster",
+        "architecture": {
+          "hidden_dim": 32,
+          "num_layers": 2,
+          "dropout": 0.0,
+          "forecast_horizon": 1
+        },
+        "features": [
+          "speed_stationary",
+          "speed_0_5",
+          "speed_5_10",
+          "speed_10_25",
+          "speed_25_80",
+          "speed_80_140",
+          "speed_140_200",
+          "speed_200_plus",
+          "speed",
+          "acceleration",
+          "acceleration_valid",
+          "bearing_sin",
+          "bearing_cos",
+          "bearing_valid",
+          "distance",
+          "elapsed_time"
+        ]
+      }
+    ],
+    "populations": [
+      {
+        "id": "inat",
+        "datasets": ["inat"],
+        "sampling_strategy": "all"
+      },
+      {
+        "id": "gowalla",
+        "datasets": ["gowalla"],
+        "sampling_strategy": "all"
+      },
+      {
+        "id": "combined",
+        "datasets": ["inat", "gowalla"],
+        "sampling_strategy": "all"
+      },
+      {
+        "id": "combined_weighted",
+        "datasets": ["inat", "gowalla"],
+        "sampling_strategy": "balanced"
+      }
+    ],
+    "feature_combinations": [
+      {
+        "id": "mpp_speed_accel_bearing_distance_time_speed",
+        "features": [
+          "speed_stationary",
+          "speed_0_5",
+          "speed_5_10",
+          "speed_10_25",
+          "speed_25_80",
+          "speed_80_140",
+          "speed_140_200",
+          "speed_200_plus",
+          "speed",
+          "acceleration",
+          "acceleration_valid",
+          "elapsed_time",
+          "distance",
+          "bearing_sin",
+          "bearing_cos",
+          "bearing_valid"
+        ]
+      }
+    ]
+  }
+}

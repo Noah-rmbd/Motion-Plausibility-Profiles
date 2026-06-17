@@ -1,0 +1,118 @@
+{
+  "base_config": null,
+  "reference_datasets": ["inat", "gowalla"],
+  "runs": [
+    {
+      "model_id": "lstm_ae_continuous_combined_all_t0_e15",
+      "experiment": {
+        "feature_representation": "continuous_speed",
+        "comparison_group": "population_and_speed"
+      },
+      "training": {
+        "datasets": ["inat", "gowalla"],
+        "sampling_strategy": "all",
+        "epochs": 15
+      },
+      "evaluation": {
+        "ignore_first_transition": false
+      }
+    },
+    {
+      "model_id": "lstm_ae_continuous_inat_all_t0_e15",
+      "experiment": {
+        "feature_representation": "continuous_speed",
+        "comparison_group": "population_and_speed"
+      },
+      "training": {
+        "datasets": ["inat"],
+        "sampling_strategy": "all",
+        "epochs": 15
+      },
+      "evaluation": {
+        "ignore_first_transition": false
+      }
+    },
+    {
+      "model_id": "lstm_ae_continuous_gowalla_all_t0_e15",
+      "experiment": {
+        "feature_representation": "continuous_speed",
+        "comparison_group": "population_and_speed"
+      },
+      "training": {
+        "datasets": ["gowalla"],
+        "sampling_strategy": "all",
+        "epochs": 15
+      },
+      "evaluation": {
+        "ignore_first_transition": false
+      }
+    },
+    {
+      "model_id": "lstm_ae_continuous_combined_balanced_t0_e15",
+      "experiment": {
+        "feature_representation": "continuous_speed",
+        "comparison_group": "population_and_speed"
+      },
+      "training": {
+        "datasets": ["inat", "gowalla"],
+        "sampling_strategy": "balanced",
+        "epochs": 15
+      },
+      "evaluation": {
+        "ignore_first_transition": false
+      }
+    },
+    {
+      "model_id": "lstm_ae_mppspeed_combined_balanced_t0_e15",
+      "features": [
+        "speed_stationary",
+        "speed_0_5",
+        "speed_5_10",
+        "speed_10_25",
+        "speed_25_80",
+        "speed_80_140",
+        "speed_140_200",
+        "speed_200_plus",
+        "elapsed_time",
+        "distance",
+        "bearing_sin",
+        "bearing_cos",
+        "bearing_valid"
+      ],
+      "experiment": {
+        "feature_representation": "mpp_speed_ranges",
+        "comparison_group": "population_and_speed"
+      },
+      "training": {
+        "datasets": ["inat", "gowalla"],
+        "sampling_strategy": "balanced",
+        "epochs": 15
+      },
+      "evaluation": {
+        "ignore_first_transition": false
+      }
+    },
+    {
+      "model_id": "lstm_ae_distance_time_bearing_combined_balanced_t0_e15",
+      "features": [
+        "elapsed_time",
+        "distance",
+        "bearing_sin",
+        "bearing_cos",
+        "bearing_valid"
+      ],
+      "experiment": {
+        "feature_representation": "distance_time_bearing",
+        "comparison_group": "population_and_speed"
+      },
+      "training": {
+        "datasets": ["inat", "gowalla"],
+        "sampling_strategy": "balanced",
+        "epochs": 15
+      },
+      "evaluation": {
+        "ignore_first_transition": false
+      }
+    }
+  ]
+}

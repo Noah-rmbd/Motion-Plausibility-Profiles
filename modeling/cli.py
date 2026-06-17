@@ -3,8 +3,16 @@ import json
 from pathlib import Path
 
 from modeling.config import load_config, write_config
-from modeling.models import LSTMAutoencoderPlugin  # noqa: F401
+from modeling.models import (  # noqa: F401
+    LAGMMPlugin,
+    LSTMAutoencoderPlugin,
+    LSTMForecasterPlugin,
+    LSTMSeq2SeqAutoencoderPlugin,
+    TLSTMAutoencoderPlugin,
+    TLSTMSeq2SeqAutoencoderPlugin,
+)
 from modeling.registry import create_model_plugin, registered_models
+from modeling.synthetic_evaluation import evaluate_synthetic_predictions
 
 
 def apply_cli_overrides(config, args):
@@ -62,6 +70,80 @@ def evaluate_command(args):
     print(json.dumps(summaries, indent=2))
 
 
+def evaluate_all_command(args):
+    results = []
+    failures = []
+    config_paths = sorted(Path(args.model_root).glob("*/config.json"))
+    for config_path in config_paths:
+        model_id = config_path.parent.name
+        try:
+            config = load_config(config_path)
+            experiment = config.get("experiment", {})
+            if (
+                args.comparison_group
+                and experiment.get("comparison_group")
+                != args.comparison_group
+            ):
+                continue
+            if args.feature_set and config.get("feature_set") != args.feature_set:
+                continue
+            if args.model_type and config.get("model_type") != args.model_type:
+                continue
+
+            config["model_id"] = model_id
+            if args.max_eval_trajectories is not None:
+                config["evaluation"]["max_trajectories"] = (
+                    args.max_eval_trajectories
+                )
+            datasets = args.datasets or config["evaluation"]["datasets"]
+            print(f"Evaluating {model_id}: {', '.join(datasets)}", flush=True)
+            plugin = create_model_plugin(config["model_type"], config)
+            summaries = plugin.evaluate(
+                feature_root=args.feature_root,
+                model_dir=config_path.parent,
+                prediction_root=args.prediction_root,
+                datasets=datasets,
+            )
+            result = {
+                "model_id": model_id,
+                "predictions": summaries,
+            }
+            if "synthetic" in datasets and not args.skip_metrics:
+                metrics = evaluate_synthetic_predictions(
+                    model_id=model_id,
+                    prediction_root=args.prediction_root,
+                    feature_root=args.feature_root,
+                    feature_set=config["feature_set"],
+                    reference_datasets=args.reference_datasets,
+                    ignore_first_transition=config["evaluation"].get(
+                        "ignore_first_transition",
+                        True,
+                    ),
+                )
+                result["synthetic_auc"] = metrics["roc_auc"]
+            results.append(result)
+        except Exception as exc:
+            failures.append(
+                {
+                    "model_id": model_id,
+                    "error": str(exc),
+                }
+            )
+            print(f"Skipped {model_id}: {exc}", flush=True)
+
+    if not results and not failures:
+        raise ValueError("No saved models matched the requested filters")
+    print(
+        json.dumps(
+            {
+                "evaluated": results,
+                "failures": failures,
+            },
+            indent=2,
+        )
+    )
+
+
 def run_command(args):
     train_command(args)
     evaluation_args = argparse.Namespace(
@@ -111,6 +193,28 @@ def main():
     add_shared_paths(evaluate_parser)
     evaluate_parser.set_defaults(handler=evaluate_command)
 
+    evaluate_all_parser = subparsers.add_parser(
+        "evaluate-all",
+        help="Evaluate every saved model matching the requested filters.",
+    )
+    evaluate_all_parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=["synthetic"],
+    )
+    evaluate_all_parser.add_argument("--comparison-group")
+    evaluate_all_parser.add_argument("--feature-set")
+    evaluate_all_parser.add_argument("--model-type")
+    evaluate_all_parser.add_argument(
+        "--reference-datasets",
+        nargs="+",
+        default=["inat", "gowalla"],
+    )
+    evaluate_all_parser.add_argument("--skip-metrics", action="store_true")
+    evaluate_all_parser.add_argument("--max-eval-trajectories", type=int)
+    add_shared_paths(evaluate_all_parser)
+    evaluate_all_parser.set_defaults(handler=evaluate_all_command)
+
     run_parser = subparsers.add_parser("run")
     add_training_arguments(run_parser)
     run_parser.set_defaults(handler=run_command)
@@ -121,4 +225,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

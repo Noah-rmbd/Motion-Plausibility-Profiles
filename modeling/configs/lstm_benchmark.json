@@ -1,0 +1,44 @@
+{
+  "name": "lstm_autoencoder",
+  "feature_groups": {
+    "mpp_distance_time_bearing": [
+      "speed_stationary",
+      "speed_0_5",
+      "speed_5_10",
+      "speed_10_25",
+      "speed_25_80",
+      "speed_80_140",
+      "speed_140_200",
+      "speed_200_plus",
+      "elapsed_time",
+      "distance",
+      "bearing_sin",
+      "bearing_cos",
+      "bearing_valid"
+    ],
+    "full": [
+      "speed",
+      "elapsed_time",
+      "distance",
+      "acceleration",
+      "acceleration_valid",
+      "bearing_sin",
+      "bearing_cos",
+      "bearing_valid"
+    ],
+    "distance_time_bearing": [
+      "elapsed_time",
+      "distance",
+      "bearing_sin",
+      "bearing_cos",
+      "bearing_valid"
+    ],
+    "distance_time": [
+      "elapsed_time",
+      "distance"
+    ]
+  },
+  "epochs": [15],
+  "batch_sizes": [256],
+  "reference_datasets": ["inat", "gowalla"]
+}

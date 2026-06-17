@@ -7,6 +7,15 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from modeling.experiments import expanded_runs
+from modeling.score_aggregation import (
+    AGGREGATION_COLUMNS,
+    TRANSITION_SCORE_MODES,
+    aggregate_transition_scores,
+    select_trajectory_scores,
+    uses_native_trajectory_score,
+)
+
 
 SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -49,8 +58,8 @@ CREATE TABLE models (
     architecture_json TEXT NOT NULL,
     training_json TEXT NOT NULL,
     evaluation_json TEXT NOT NULL,
-    final_loss REAL,
-    synthetic_metrics_json TEXT
+    experiment_json TEXT NOT NULL,
+    final_loss REAL
 );
 
 CREATE TABLE model_datasets (
@@ -177,29 +186,45 @@ def threshold_curve(scores):
     ]
 
 
-def import_models(conn, model_root, prediction_root):
+def import_models(
+    conn,
+    model_root,
+    prediction_root,
+    feature_root,
+    comparison_group=None,
+    datasets=None,
+    model_ids=None,
+):
     model_root = Path(model_root)
     prediction_root = Path(prediction_root)
+    allowed_datasets = set(datasets or [])
+    allowed_model_ids = set(model_ids or [])
     for config_path in sorted(model_root.glob("*/config.json")):
         model_dir = config_path.parent
         model_id = model_dir.name
+        if allowed_model_ids and model_id not in allowed_model_ids:
+            continue
         prediction_dir = prediction_root / model_id
         if not prediction_dir.exists():
             continue
         with config_path.open("r", encoding="utf-8") as handle:
             config = json.load(handle)
+        if (
+            comparison_group
+            and config.get("experiment", {}).get("comparison_group")
+            != comparison_group
+        ):
+            continue
+        if allowed_datasets:
+            training_datasets = set(config.get("training", {}).get("datasets", []))
+            if training_datasets - allowed_datasets:
+                continue
         history_path = model_dir / "training_history.parquet"
         final_loss = None
         if history_path.exists():
             history = pd.read_parquet(history_path)
             if not history.empty:
                 final_loss = float(history.iloc[-1]["loss"])
-        metrics_path = prediction_dir / "synthetic" / "metrics.json"
-        metrics = None
-        if metrics_path.exists():
-            with metrics_path.open("r", encoding="utf-8") as handle:
-                metrics = json.load(handle)
-
         conn.execute(
             "INSERT INTO models VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -210,16 +235,109 @@ def import_models(conn, model_root, prediction_root):
                 json.dumps(config.get("architecture", {})),
                 json.dumps(config["training"]),
                 json.dumps(config["evaluation"]),
+                json.dumps(config.get("experiment", {})),
                 final_loss,
-                json.dumps(metrics) if metrics else None,
             ),
         )
 
         for score_path in sorted(prediction_dir.glob("*/trajectory_scores.parquet")):
             dataset = score_path.parent.name
-            scores = pd.read_parquet(score_path, columns=["score"])["score"].to_numpy(dtype=float)
-            if not len(scores):
+            if allowed_datasets and dataset not in allowed_datasets:
                 continue
+            feature_dataset_dir = (
+                Path(feature_root)
+                / config["feature_set"]
+                / dataset
+            )
+            feature_paths = [
+                feature_dataset_dir / "trajectories.parquet",
+                feature_dataset_dir / "transition_features.parquet",
+            ]
+            if (
+                dataset == "synthetic"
+                and any(
+                    path.exists()
+                    and path.stat().st_mtime > score_path.stat().st_mtime
+                    for path in feature_paths
+                )
+            ):
+                print(
+                    f"Skipping stale synthetic predictions: {model_id}"
+                )
+                continue
+            score_frame = pd.read_parquet(score_path)
+            transition_frame = pd.read_parquet(
+                score_path.with_name("transition_scores.parquet")
+            )
+            selected_scores = select_trajectory_scores(
+                score_frame,
+                transition_frame,
+                aggregation="mean",
+                ignore_first_transition=False,
+                transition_score_mode="mean",
+            )
+            scores = selected_scores["selected_score"].to_numpy(dtype=float)
+            if not len(score_frame):
+                continue
+            calibration_path = (
+                Path(feature_root)
+                / config["feature_set"]
+                / dataset
+                / "trajectories.parquet"
+            )
+            calibration_ids = None
+            if calibration_path.exists() and dataset != "synthetic":
+                calibration_frame = pd.read_parquet(
+                    calibration_path,
+                    columns=["trajectory_id", "use_for_calibration"],
+                )
+                calibration_ids = set(
+                    calibration_frame.loc[
+                        calibration_frame["use_for_calibration"],
+                        "trajectory_id",
+                    ]
+                )
+            curves = {}
+            if uses_native_trajectory_score(score_frame):
+                native_scores = select_trajectory_scores(
+                    score_frame,
+                    transition_frame,
+                    aggregation="mean",
+                    ignore_first_transition=False,
+                    transition_score_mode="mean",
+                )
+                if calibration_ids is not None:
+                    native_scores = native_scores.loc[
+                        native_scores["trajectory_id"].isin(calibration_ids)
+                    ]
+                native_curve = threshold_curve(
+                    native_scores["selected_score"].to_numpy(dtype=float)
+                )
+                for score_mode in TRANSITION_SCORE_MODES:
+                    curves[score_mode] = {}
+                    for first_key in ("included", "excluded"):
+                        curves[score_mode][first_key] = {
+                            aggregation: native_curve
+                            for aggregation in AGGREGATION_COLUMNS
+                        }
+            else:
+                for score_mode in TRANSITION_SCORE_MODES:
+                    curves[score_mode] = {}
+                    for first_key in ("included", "excluded"):
+                        curves[score_mode][first_key] = {}
+                        aggregated = aggregate_transition_scores(
+                            transition_frame,
+                            ignore_first_transition=first_key == "excluded",
+                            transition_score_mode=score_mode,
+                        )
+                        if calibration_ids is not None:
+                            aggregated = aggregated.loc[
+                                aggregated["trajectory_id"].isin(calibration_ids)
+                            ]
+                        for aggregation, score_column in AGGREGATION_COLUMNS.items():
+                            curves[score_mode][first_key][aggregation] = threshold_curve(
+                                aggregated[score_column].to_numpy(dtype=float)
+                            )
             conn.execute(
                 "INSERT INTO model_datasets VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -229,24 +347,48 @@ def import_models(conn, model_root, prediction_root):
                     float(scores.min()),
                     float(scores.max()),
                     float(scores.mean()),
-                    json.dumps(threshold_curve(scores)),
+                    json.dumps(curves),
                 ),
             )
         conn.commit()
         print(f"Indexed model: {model_id}")
 
 
-def build_database(db_path, processed_root, model_root, prediction_root, datasets):
+def build_database(
+    db_path,
+    processed_root,
+    model_root,
+    prediction_root,
+    feature_root,
+    comparison_group,
+    datasets,
+    experiment_config=None,
+):
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = db_path.with_suffix(f"{db_path.suffix}.tmp")
     temp_path.unlink(missing_ok=True)
+    model_ids = None
+    if experiment_config:
+        experiment_path = Path(experiment_config)
+        with experiment_path.open("r", encoding="utf-8") as handle:
+            experiment = json.load(handle)
+        model_ids = [run["model_id"] for run in expanded_runs(experiment)]
+
     conn = sqlite3.connect(temp_path)
     try:
         conn.executescript(SCHEMA)
         for dataset in datasets:
             import_dataset(conn, processed_root, dataset)
-        import_models(conn, model_root, prediction_root)
+        import_models(
+            conn,
+            model_root,
+            prediction_root,
+            feature_root,
+            comparison_group,
+            datasets,
+            model_ids,
+        )
         conn.execute("ANALYZE")
         conn.commit()
     finally:
@@ -263,14 +405,35 @@ def main():
     parser.add_argument("--processed-root", default="data/processed_parquet")
     parser.add_argument("--model-root", default="artifacts/models")
     parser.add_argument("--prediction-root", default="artifacts/predictions")
-    parser.add_argument("--datasets", nargs="+", default=["inat", "gowalla", "synthetic"])
+    parser.add_argument("--feature-root", default="data/features")
+    parser.add_argument(
+        "--comparison-group",
+        default="configurable_pipeline_v3",
+        help="Only index models from this experiment group. Use an empty value for all.",
+    )
+    parser.add_argument(
+        "--experiment-config",
+        default="modeling/configs/configurable_model_matrix.json",
+        help=(
+            "Only index model IDs expanded from this experiment config. "
+            "Use an empty value to index every artifact matching --comparison-group."
+        ),
+    )
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=["inat", "gowalla", "synthetic"],
+    )
     args = parser.parse_args()
     build_database(
         db_path=args.db_path,
         processed_root=args.processed_root,
         model_root=args.model_root,
         prediction_root=args.prediction_root,
+        feature_root=args.feature_root,
+        comparison_group=args.comparison_group or None,
         datasets=args.datasets,
+        experiment_config=args.experiment_config or None,
     )
 
 

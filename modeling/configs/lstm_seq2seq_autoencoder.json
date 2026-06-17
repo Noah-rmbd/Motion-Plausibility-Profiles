@@ -1,0 +1,40 @@
+{
+  "model_type": "lstm_seq2seq_autoencoder",
+  "feature_set": "motion_v2",
+  "features": [
+    "speed",
+    "elapsed_time",
+    "distance",
+    "acceleration",
+    "acceleration_valid",
+    "bearing_sin",
+    "bearing_cos",
+    "bearing_valid"
+  ],
+  "architecture": {
+    "hidden_dim": 32,
+    "num_layers": 2,
+    "dropout": 0.0,
+    "decoder": "teacher_forced_training_autoregressive_evaluation"
+  },
+  "training": {
+    "datasets": ["inat", "gowalla"],
+    "epochs": 15,
+    "batch_size": 256,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0,
+    "loss": "masked_concept_mse",
+    "seed": 42,
+    "device": "auto",
+    "num_workers": 0,
+    "max_trajectories": null
+  },
+  "evaluation": {
+    "datasets": ["inat", "gowalla", "synthetic"],
+    "batch_size": 256,
+    "device": "auto",
+    "num_workers": 0,
+    "max_trajectories": null,
+    "ignore_first_transition": false
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "base_config": null,
+  "reference_datasets": ["inat", "gowalla"],
+  "matrix": {
+    "model_id_prefix": "v2",
+    "comparison_group": "configurable_pipeline_v2",
+    "epochs": 15,
+    "architectures": [
+      {
+        "id": "t_lstm_seq2seq",
+        "model_type": "t_lstm_seq2seq_autoencoder",
+        "architecture": {
+          "decoder": "teacher_forced_training_autoregressive_evaluation",
+          "time_context": "elapsed_time",
+          "time_unit": "hours",
+          "time_aware_components": "encoder_and_decoder",
+          "time_scale_seconds": 3600.0,
+          "decay_function": "inverse_log"
+        }
+      }
+    ],
+    "populations": [
+      {
+        "id": "inat",
+        "datasets": ["inat"],
+        "sampling_strategy": "all"
+      },
+      {
+        "id": "gowalla",
+        "datasets": ["gowalla"],
+        "sampling_strategy": "all"
+      },
+      {
+        "id": "combined",
+        "datasets": ["inat", "gowalla"],
+        "sampling_strategy": "all"
+      },
+      {
+        "id": "combined_weighted",
+        "datasets": ["inat", "gowalla"],
+        "sampling_strategy": "balanced"
+      }
+    ],
+    "feature_combinations": [
+      {
+        "id": "mpp_distance_time_bearing",
+        "features": [
+          "speed_stationary",
+          "speed_0_5",
+          "speed_5_10",
+          "speed_10_25",
+          "speed_25_80",
+          "speed_80_140",
+          "speed_140_200",
+          "speed_200_plus",
+          "elapsed_time",
+          "distance",
+          "bearing_sin",
+          "bearing_cos",
+          "bearing_valid"
+        ]
+      },
+      {
+        "id": "distance_time_bearing",
+        "features": [
+          "elapsed_time",
+          "distance",
+          "bearing_sin",
+          "bearing_cos",
+          "bearing_valid"
+        ]
+      }
+    ]
+  }
+}

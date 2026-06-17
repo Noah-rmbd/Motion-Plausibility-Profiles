@@ -185,18 +185,80 @@ h1 {
     font-weight: bold;
 }
 
-.timeline-day.unplausible {
+.timeline-day.baseline-anomaly {
     background-color: rgba(220, 53, 69, 0.8);
     border: 1px solid #ff4d4d;
 }
 
-.timeline-day.unplausible:hover {
+.timeline-day.baseline-anomaly:hover {
     background-color: rgba(220, 53, 69, 1);
 }
 
-.timeline-day.unplausible.selected {
+.timeline-day.model-anomaly {
+    background-color: #276fbf;
+    border: 1px solid #174a85;
+}
+
+.timeline-day.model-anomaly:hover {
+    background-color: #1f5eaa;
+}
+
+.timeline-day.combined-anomaly {
+    background-color: #7a3e9d;
+    border: 1px solid #52266d;
+}
+
+.timeline-day.combined-anomaly:hover {
+    background-color: #633181;
+}
+
+.timeline-day.baseline-anomaly.selected {
     background-color: rgba(220, 53, 69, 1);
     border: 2px solid white;
+}
+
+.timeline-day.model-anomaly.selected {
+    background-color: #1f5eaa;
+    border: 2px solid white;
+}
+
+.timeline-day.combined-anomaly.selected {
+    background-color: #633181;
+    border: 2px solid white;
+}
+
+.timeline-anomaly-key {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-left: 18px;
+    color: white;
+    font: 11px sans-serif;
+}
+
+.timeline-anomaly-key span {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+.timeline-anomaly-key i {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+}
+
+.baseline-key {
+    background: #dc3545;
+}
+
+.model-key {
+    background: #276fbf;
+}
+
+.combined-key {
+    background: #7a3e9d;
 }
 
 /* Legend Styles */
@@ -267,59 +329,247 @@ h1 {
     font-variant-numeric: tabular-nums;
 }
 
-#model-info-button {
-    width: 30px;
+#threshold-reference {
+    color: #666;
+    font-size: 10px;
+}
+
+#aggregation-control {
+    display: grid;
+    gap: 3px;
+    min-width: 115px;
+    font-family: sans-serif;
+    font-size: 11px;
+}
+
+#aggregation-select {
+    padding: 4px;
+}
+
+#model-setup-button,
+#stats-button {
     height: 30px;
-    border: 0;
-    border-radius: 50%;
+    padding: 0 10px;
+    border: 1px solid #555;
+    border-radius: 4px;
     background: #333;
     color: white;
-    font-weight: bold;
     cursor: pointer;
 }
 
-#model-info-panel {
+#model-setup-panel,
+#stats-panel {
     position: absolute;
     z-index: 1200;
     top: 72px;
-    right: 3%;
-    width: 330px;
-    max-height: calc(100vh - 150px);
+    left: 3%;
+    width: min(520px, calc(100vw - 48px));
+    max-height: calc(100vh - 155px);
     overflow: auto;
     padding: 18px;
     border-radius: 6px;
     background: rgba(255, 255, 255, 0.97);
-    box-shadow: 0 5px 20px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 3px 16px rgba(0, 0, 0, 0.25);
     font-family: sans-serif;
+}
+
+#model-setup-panel label,
+#stats-panel label {
+    display: grid;
+    gap: 4px;
+    color: #555;
     font-size: 12px;
 }
 
-#model-info-panel h2 {
-    margin: 0 0 12px;
-    font-size: 16px;
+#model-setup-panel select,
+#stats-panel select {
+    width: 100%;
+    padding: 6px;
 }
 
-#model-info-panel dl {
-    display: grid;
-    grid-template-columns: 95px 1fr;
-    gap: 7px;
-}
-
-#model-info-panel dt {
-    color: #666;
-}
-
-#model-info-panel dd {
-    margin: 0;
-    overflow-wrap: anywhere;
-}
-
-#close-model-info {
+#close-model-setup,
+#close-stats {
     float: right;
     border: 0;
     background: transparent;
     font-size: 22px;
     cursor: pointer;
+}
+
+#model-setup-panel h2,
+#stats-panel h2 {
+    margin: 0 0 12px;
+    font-size: 16px;
+}
+
+#model-setup-panel h3,
+#stats-panel h3 {
+    margin: 0 0 8px;
+    font-size: 13px;
+}
+
+.model-panel-section {
+    padding: 12px 0;
+    border-top: 1px solid #ddd;
+}
+
+.model-filter-grid,
+.score-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+#model-setup-panel dl {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 7px;
+    margin: 0;
+    font-size: 11px;
+}
+
+#model-setup-panel dt {
+    color: #666;
+}
+
+#model-setup-panel dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+#stats-panel {
+    left: auto;
+    right: 3%;
+    width: min(660px, calc(100vw - 48px));
+}
+
+.stats-controls {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    padding: 12px 0;
+    border-top: 1px solid #ddd;
+}
+
+#stats-summary,
+#stats-feature-errors,
+#stats-quality {
+    padding: 10px 0;
+    border-top: 1px solid #ddd;
+}
+
+#stats-summary dl,
+#stats-quality dl {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(90px, 1fr));
+    gap: 8px;
+    margin: 0;
+    font-size: 11px;
+}
+
+#stats-summary dt,
+#stats-quality dt {
+    color: #666;
+}
+
+#stats-summary dd,
+#stats-quality dd {
+    margin: 0;
+    font-weight: bold;
+    font-variant-numeric: tabular-nums;
+}
+
+#stats-plot {
+    width: 100%;
+    height: 360px;
+    border-top: 1px solid #ddd;
+}
+
+.stats-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 10px;
+    border-top: 1px solid #ddd;
+}
+
+.stats-actions button {
+    padding: 6px 10px;
+    border: 1px solid #777;
+    border-radius: 4px;
+    background: white;
+    cursor: pointer;
+}
+
+@media (max-width: 760px) {
+    .stats-controls {
+        grid-template-columns: 1fr;
+    }
+
+    #stats-summary dl,
+    #stats-quality dl {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+#performance-panel {
+    font-size: 11px;
+}
+
+.performance-heading {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.performance-heading strong,
+.performance-heading span {
+    display: block;
+}
+
+.performance-heading span {
+    margin-top: 2px;
+    color: #666;
+}
+
+.metric-reference {
+    margin: 0 0 8px;
+    color: #666;
+    font-size: 10px;
+}
+
+#performance-auc {
+    font-weight: bold;
+    color: #333;
+}
+
+.metric-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+}
+
+.metric-table th,
+.metric-table td {
+    padding: 4px 3px;
+    border-top: 1px solid #ddd;
+    text-align: right;
+}
+
+.metric-table th:first-child,
+.metric-table td:first-child {
+    text-align: left;
+}
+
+.metric-table tbody tr:first-child {
+    font-weight: bold;
+    background: rgba(76, 175, 80, 0.08);
+}
+
+.metric-counts {
+    margin-top: 8px;
+    color: #666;
 }
 
 /* Hide arrows when zoomed out to improve performance */

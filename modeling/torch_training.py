@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from modeling.losses import get_loss
+from modeling.losses import concept_feature_weights, get_loss
 
 
 def choose_device(requested):
@@ -25,6 +25,7 @@ def set_global_seed(seed):
 
 def train_reconstruction_model(model, dataloader, config, device):
     loss_function = get_loss(config["training"]["loss"])
+    feature_weights = concept_feature_weights(config["features"])
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=config["training"]["learning_rate"],
@@ -39,11 +40,27 @@ def train_reconstruction_model(model, dataloader, config, device):
         weighted_loss = 0.0
         value_count = 0
 
-        for sequences, lengths, _ in dataloader:
+        for batch in dataloader:
+            if len(batch) == 3:
+                sequences, lengths, _ = batch
+                model_context = None
+            else:
+                sequences, lengths, model_context, _ = batch
             sequences = sequences.to(device)
+            if model_context is not None:
+                model_context = model_context.to(device)
             optimizer.zero_grad()
-            reconstructed = model(sequences, lengths)
-            loss, batch_value_count = loss_function(reconstructed, sequences, lengths)
+            reconstructed = (
+                model(sequences, lengths)
+                if model_context is None
+                else model(sequences, lengths, model_context)
+            )
+            loss, batch_value_count = loss_function(
+                reconstructed,
+                sequences,
+                lengths,
+                feature_weights=feature_weights,
+            )
             loss.backward()
             optimizer.step()
 

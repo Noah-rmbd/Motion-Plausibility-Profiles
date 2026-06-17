@@ -5,27 +5,35 @@ from pathlib import Path
 
 DEFAULT_CONFIG = {
     "model_type": "lstm_autoencoder",
-    "feature_set": "motion_v1",
+    "feature_set": "motion_v2",
     "features": [
         "speed",
         "elapsed_time",
         "distance",
         "acceleration",
+        "acceleration_valid",
         "bearing_sin",
         "bearing_cos",
+        "bearing_valid",
     ],
     "architecture": {
         "hidden_dim": 32,
         "num_layers": 2,
         "dropout": 0.0,
     },
+    "preprocessing": {
+        "scaler": "robust",
+        "quantile_range": [5.0, 95.0],
+        "max_scaler_rows": 500000,
+    },
     "training": {
         "datasets": ["inat", "gowalla"],
+        "sampling_strategy": "all",
         "epochs": 10,
         "batch_size": 256,
         "learning_rate": 0.001,
         "weight_decay": 0.0,
-        "loss": "masked_mse",
+        "loss": "masked_concept_mse",
         "seed": 42,
         "device": "auto",
         "num_workers": 0,
@@ -37,7 +45,10 @@ DEFAULT_CONFIG = {
         "device": "auto",
         "num_workers": 0,
         "max_trajectories": None,
-        "ignore_first_transition": True,
+        "ignore_first_transition": False,
+    },
+    "experiment": {
+        "feature_representation": "continuous_speed",
     },
 }
 

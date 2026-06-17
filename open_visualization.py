@@ -8,12 +8,33 @@ from pathlib import Path
 
 import pandas as pd
 
+from modeling.score_aggregation import (
+    AGGREGATION_COLUMNS,
+    DEFAULT_WINDOW_SIZE,
+    DEFAULT_TOP_K,
+    TRANSITION_SCORE_MODES,
+    aggregate_transition_scores,
+    select_trajectory_scores,
+    transition_error_scores,
+)
+from modeling.model_diagnostics import build_model_population_stats
+
 
 ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = ROOT / "interactive_visualisation"
 DB_PATH = ROOT / "artifacts/app/plausibility.db"
 PREDICTION_ROOT = ROOT / "artifacts/predictions"
 PROCESSED_ROOT = ROOT / "data/processed_parquet"
+STATS_ROOT = ROOT / "artifacts/stats/processed_parquet"
+
+STATS_METRICS = {
+    "speed": "transition_metrics",
+    "acceleration": "transition_metrics",
+    "distance": "transition_metrics",
+    "elapsed_time": "transition_metrics",
+    "bearing_change": "transition_metrics",
+    "trajectory_n_transitions": "trajectory_n_transitions",
+}
 
 
 def connection():
@@ -28,6 +49,25 @@ def json_value(value):
     return json.loads(value)
 
 
+def synthetic_metrics(model_id):
+    path = PREDICTION_ROOT / model_id / "synthetic" / "metrics.json"
+    if not path.exists():
+        return None
+    synthetic_features = (
+        ROOT / "data/features/motion_v2/synthetic/trajectories.parquet"
+    )
+    if (
+        synthetic_features.exists()
+        and synthetic_features.stat().st_mtime > path.stat().st_mtime
+    ):
+        return None
+    with path.open("r", encoding="utf-8") as handle:
+        metrics = json.load(handle)
+    if metrics.get("metrics_schema_version") != 3:
+        return None
+    return metrics
+
+
 def model_record(row, datasets):
     return {
         "model_id": row["model_id"],
@@ -37,8 +77,9 @@ def model_record(row, datasets):
         "architecture": json_value(row["architecture_json"]),
         "training": json_value(row["training_json"]),
         "evaluation": json_value(row["evaluation_json"]),
+        "experiment": json_value(row["experiment_json"]),
         "final_loss": row["final_loss"],
-        "synthetic_metrics": json_value(row["synthetic_metrics_json"]),
+        "synthetic_metrics": None,
         "datasets": datasets,
     }
 
@@ -52,6 +93,18 @@ def read_scores(model_id, dataset, table, trajectory_ids):
     return pd.read_parquet(
         path,
         filters=[("trajectory_id", "in", [int(value) for value in trajectory_ids])],
+    )
+
+
+def highest_scoring_window_transition_ids(group, window_size=DEFAULT_WINDOW_SIZE):
+    ordered = group.sort_values("transition_order").copy()
+    ordered["window_score"] = (
+        ordered["selected_score"].rolling(window_size, min_periods=1).mean()
+    )
+    end_position = int(ordered["window_score"].to_numpy().argmax())
+    start_position = max(0, end_position - window_size + 1)
+    return set(
+        ordered.iloc[start_position : end_position + 1]["transition_id"]
     )
 
 
@@ -116,9 +169,14 @@ def canonical_payload(dataset, trajectory_ids, model_id=None):
 
 class VisualizationHandler(BaseHTTPRequestHandler):
     def send_json(self, payload, status=200):
-        body = json.dumps(payload, allow_nan=False).encode("utf-8")
+        body = json.dumps(
+            payload,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -131,6 +189,8 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                 return self.catalog()
             if parsed.path == "/api/models":
                 return self.models()
+            if parsed.path == "/api/model_metrics":
+                return self.model_metrics(query)
             if parsed.path == "/api/users":
                 return self.users(query)
             if parsed.path == "/api/user_data":
@@ -139,6 +199,8 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                 return self.timeline(query)
             if parsed.path == "/api/trajectories":
                 return self.trajectories(query)
+            if parsed.path == "/api/stats":
+                return self.stats(query)
             return self.static_file(parsed.path)
         except (ValueError, KeyError) as exc:
             return self.send_json({"error": str(exc)}, 400)
@@ -147,11 +209,13 @@ class VisualizationHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path != "/api/scores":
+        if parsed.path not in {"/api/scores", "/api/model_stats"}:
             return self.send_json({"error": "not found"}, 404)
         try:
             length = int(self.headers.get("Content-Length", 0))
             request = json.loads(self.rfile.read(length) or b"{}")
+            if parsed.path == "/api/model_stats":
+                return self.model_stats(request)
             return self.scores(request)
         except (ValueError, KeyError) as exc:
             return self.send_json({"error": str(exc)}, 400)
@@ -165,10 +229,7 @@ class VisualizationHandler(BaseHTTPRequestHandler):
             models = []
             for row in model_rows:
                 model_datasets = [
-                    {
-                        **dict(dataset_row),
-                        "threshold_curve": json_value(dataset_row["threshold_curve_json"]),
-                    }
+                    dict(dataset_row)
                     for dataset_row in conn.execute(
                         "SELECT * FROM model_datasets WHERE model_id = ? ORDER BY dataset",
                         (row["model_id"],),
@@ -185,10 +246,7 @@ class VisualizationHandler(BaseHTTPRequestHandler):
             models = []
             for row in rows:
                 datasets = [
-                    {
-                        **dict(dataset_row),
-                        "threshold_curve": json_value(dataset_row["threshold_curve_json"]),
-                    }
+                    dict(dataset_row)
                     for dataset_row in conn.execute(
                         "SELECT * FROM model_datasets WHERE model_id = ? ORDER BY dataset",
                         (row["model_id"],),
@@ -198,6 +256,19 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                     item.pop("threshold_curve_json", None)
                 models.append(model_record(row, datasets))
         self.send_json(models)
+
+    def model_metrics(self, query):
+        model_id = query.get("model_id", [""])[0]
+        if not model_id:
+            raise ValueError("model_id is required")
+        with connection() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM models WHERE model_id = ?",
+                (model_id,),
+            ).fetchone()
+        if exists is None:
+            raise ValueError(f"Unknown model: {model_id}")
+        self.send_json(synthetic_metrics(model_id))
 
     def users(self, query):
         dataset = query.get("dataset", [""])[0]
@@ -252,8 +323,13 @@ class VisualizationHandler(BaseHTTPRequestHandler):
         )
         trajectory_by_id = {row["trajectory_id"]: row for row in trajectory_rows}
         transitions = []
+        baseline_reasons = {}
         for row in payload["transitions"]:
             trajectory = trajectory_by_id[row["trajectory_id"]]
+            baseline_unplausible = row.get("transition_plausibility") == 0
+            if baseline_unplausible:
+                reason = row.get("plausibility_reason") or "Deterministic plausibility policy"
+                baseline_reasons.setdefault(row["trajectory_id"], set()).add(reason)
             transitions.append(
                 {
                     **row,
@@ -264,6 +340,9 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                     "distance": row["distance_m"],
                     "acceleration": row["acceleration_m_s2"],
                     "bearing_change": row["bearing_change_rad"],
+                    "baseline_unplausible": baseline_unplausible,
+                    "model_unplausible": False,
+                    "is_unplausible": baseline_unplausible,
                 }
             )
         mapping = {}
@@ -274,7 +353,12 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                 **row,
                 "date": (row["start_timestamp"] or "")[:10].replace("-", "/"),
                 "transitions": mapping.get(row["trajectory_id"], []),
-                "is_unplausible": False,
+                "baseline_unplausible": row["trajectory_id"] in baseline_reasons,
+                "baseline_reasons": sorted(
+                    baseline_reasons.get(row["trajectory_id"], set())
+                ),
+                "model_unplausible": False,
+                "is_unplausible": row["trajectory_id"] in baseline_reasons,
             }
             for row in trajectory_rows
         ]
@@ -340,58 +424,227 @@ class VisualizationHandler(BaseHTTPRequestHandler):
             raise ValueError("dataset and trajectory_ids are required")
         self.send_json(canonical_payload(dataset, trajectory_ids, model_id))
 
+    def stats(self, query):
+        dataset = query.get("dataset", ["inat"])[0]
+        subset = query.get("subset", ["clean_real"])[0]
+        metric = query.get("metric", ["speed"])[0]
+        if metric not in STATS_METRICS:
+            raise ValueError(f"Unknown statistics metric: {metric}")
+        summary_path = STATS_ROOT / "summary.json"
+        if not summary_path.exists():
+            raise FileNotFoundError(
+                f"{summary_path} does not exist. Run Dataset_Preprocessing/parquet_dataset_stats.py."
+            )
+        with summary_path.open("r", encoding="utf-8") as handle:
+            complete_summary = json.load(handle)
+        try:
+            subset_summary = complete_summary["datasets"][dataset][subset]
+        except KeyError as exc:
+            raise ValueError(f"Unknown statistics dataset/subset: {dataset}/{subset}") from exc
+        metric_group = STATS_METRICS[metric]
+        metric_summary = (
+            subset_summary[metric_group][metric]
+            if metric_group == "transition_metrics"
+            else subset_summary[metric_group]
+        )
+        histogram_path = STATS_ROOT / "histograms" / f"{dataset}_{subset}_{metric}.csv"
+        histogram = pd.read_csv(histogram_path).to_dict("records")
+        self.send_json(
+            {
+                "dataset": dataset,
+                "subset": subset,
+                "metric": metric,
+                "n_trajectories": subset_summary["n_trajectories"],
+                "n_transitions": subset_summary["n_transitions"],
+                "summary": metric_summary,
+                "data_quality": subset_summary.get("data_quality", {}),
+                "histogram": histogram,
+            }
+        )
+
+    def model_stats(self, request):
+        model_id = request["model_id"]
+        with connection() as conn:
+            row = conn.execute(
+                "SELECT feature_set FROM models WHERE model_id = ?",
+                (model_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"Unknown model: {model_id}")
+        payload = build_model_population_stats(
+            model_id=model_id,
+            dataset=request["dataset"],
+            population=request.get("population", "model_flagged"),
+            metric=request.get("metric", "model_score"),
+            anomaly_percentage=float(request.get("anomaly_percentage", 5.0)),
+            aggregation=request.get("aggregation", "mean"),
+            transition_score_mode=request.get(
+                "transition_score_mode",
+                "mean",
+            ),
+            include_first_transition=bool(
+                request.get("include_first_transition", True)
+            ),
+            prediction_root=PREDICTION_ROOT,
+            feature_root=ROOT / "data/features",
+            processed_root=PROCESSED_ROOT,
+            feature_set=row["feature_set"],
+        )
+        self.send_json(payload)
+
     def scores(self, request):
         dataset = request["dataset"]
         model_id = request["model_id"]
         trajectory_ids = [int(value) for value in request.get("trajectory_ids", [])]
         percentage = float(request.get("anomaly_percentage", 5.0))
+        aggregation = request.get("aggregation", "mean")
+        transition_score_mode = request.get("transition_score_mode", "mean")
+        include_first_transition = bool(
+            request.get("include_first_transition", True)
+        )
+        if aggregation not in AGGREGATION_COLUMNS:
+            raise ValueError(f"Unknown trajectory aggregation: {aggregation}")
+        if transition_score_mode not in TRANSITION_SCORE_MODES:
+            raise ValueError(
+                f"Unknown transition score mode: {transition_score_mode}"
+            )
+        first_key = "included" if include_first_transition else "excluded"
+        with connection() as conn:
+            model_row = conn.execute(
+                """
+                SELECT evaluation_json
+                FROM models WHERE model_id = ?
+                """,
+                (model_id,),
+            ).fetchone()
+        evaluation = json_value(model_row["evaluation_json"]) if model_row else {}
         trajectory_scores = read_scores(
             model_id, dataset, "trajectory_scores", trajectory_ids
         )
         transition_scores = read_scores(
             model_id, dataset, "transition_scores", trajectory_ids
         )
-        with connection() as conn:
-            row = conn.execute(
-                """
-                SELECT threshold_curve_json FROM model_datasets
-                WHERE model_id = ? AND dataset = ?
-                """,
-                (model_id, dataset),
-            ).fetchone()
-        curve = json_value(row["threshold_curve_json"]) if row else []
-        threshold = min(
-            curve,
-            key=lambda item: abs(item["percentage"] - percentage),
-            default={"threshold": float("inf")},
-        )["threshold"]
+        selected_trajectory_scores = select_trajectory_scores(
+            trajectory_scores,
+            transition_scores,
+            aggregation=aggregation,
+            ignore_first_transition=not include_first_transition,
+            transition_score_mode=transition_score_mode,
+        )
+        transition_scores = transition_scores.copy()
+        transition_scores["selected_score"] = transition_error_scores(
+            transition_scores,
+            mode=transition_score_mode,
+        )
+        trajectory_scores = trajectory_scores.merge(
+            selected_trajectory_scores,
+            on="trajectory_id",
+            how="left",
+            validate="one_to_one",
+            suffixes=("", "_selected"),
+        )
+        threshold_reference = dataset
+        if dataset == "synthetic" and model_row:
+            model_metrics = synthetic_metrics(model_id) or {}
+            if model_metrics.get("metrics_schema_version") != 3:
+                raise ValueError(
+                    f"{model_id}: synthetic metrics use an obsolete evaluation schema"
+                )
+            aggregation_metrics = (
+                model_metrics.get("scoring", {})
+                .get(transition_score_mode, {})
+                .get(first_key, {})
+                .get(aggregation)
+            )
+            if aggregation_metrics is None:
+                aggregation_metrics = model_metrics.get("aggregations", {}).get(
+                    aggregation,
+                    model_metrics,
+                )
+            metric_point = min(
+                aggregation_metrics.get("threshold_metrics", []),
+                key=lambda item: abs(item["anomaly_percentage"] - percentage),
+                default=None,
+            )
+            if metric_point and "threshold" in metric_point:
+                threshold = metric_point["threshold"]
+                threshold_reference = "unlabeled held-out real score distribution"
+            else:
+                threshold = float("inf")
+        else:
+            with connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT threshold_curve_json FROM model_datasets
+                    WHERE model_id = ? AND dataset = ?
+                    """,
+                    (model_id, dataset),
+                ).fetchone()
+            curves = json_value(row["threshold_curve_json"]) if row else {}
+            curve = (
+                curves.get(transition_score_mode, {})
+                .get(first_key, {})
+                .get(aggregation, [])
+                if isinstance(curves, dict)
+                else curves
+            )
+            if not curve and isinstance(curves, dict):
+                curve = curves.get(aggregation, [])
+            threshold = min(
+                curve,
+                key=lambda item: abs(item["percentage"] - percentage),
+                default={"threshold": float("inf")},
+            )["threshold"]
         trajectory_result = {}
         anomalous_ids = set()
         for score in trajectory_scores.to_dict("records"):
-            anomalous = float(score["score"]) >= threshold
+            selected_score = float(score["selected_score"])
+            anomalous = selected_score >= threshold
             if anomalous:
                 anomalous_ids.add(score["trajectory_id"])
             trajectory_result[str(score["trajectory_id"])] = {
                 **score,
-                "reconstruction_error": score["score"],
+                "model_score": selected_score,
+                "score_type": score.get(
+                    "score_type",
+                    "reconstruction_error",
+                ),
+                "reconstruction_error": float(
+                    score.get("reconstruction_score", selected_score)
+                ),
+                "aggregation": aggregation,
                 "is_unplausible": anomalous,
             }
-        highest_steps = {}
-        for score in transition_scores.to_dict("records"):
-            current = highest_steps.get(score["trajectory_id"])
-            if current is None or score["score"] > current["score"]:
-                highest_steps[score["trajectory_id"]] = score
+        ranked_steps = {}
+        for trajectory_id, group in transition_scores.groupby("trajectory_id", sort=False):
+            eligible = (
+                group
+                if include_first_transition
+                else group.loc[group["transition_order"] > 0]
+            )
+            if eligible.empty:
+                eligible = group
+            if aggregation == "window_max":
+                ranked_steps[trajectory_id] = highest_scoring_window_transition_ids(
+                    eligible
+                )
+            else:
+                contribution_count = DEFAULT_TOP_K if aggregation == "top_k" else 1
+                ranked_steps[trajectory_id] = set(
+                    eligible.nlargest(contribution_count, "selected_score")[
+                        "transition_id"
+                    ]
+                )
         transition_result = {}
         for score in transition_scores.to_dict("records"):
             feature_keys = [key for key in score if key.startswith("error_")]
             is_least_plausible = (
                 score["trajectory_id"] in anomalous_ids
-                and highest_steps[score["trajectory_id"]]["transition_id"]
-                == score["transition_id"]
+                and score["transition_id"] in ranked_steps[score["trajectory_id"]]
             )
             transition_result[str(score["transition_id"])] = {
                 **score,
-                "mse": score["score"],
+                "mse": score["selected_score"],
                 "features": [score[key] for key in feature_keys],
                 "feature_names": [key.removeprefix("error_") for key in feature_keys],
                 "is_unplausible": is_least_plausible,
@@ -399,6 +652,9 @@ class VisualizationHandler(BaseHTTPRequestHandler):
         self.send_json(
             {
                 "threshold": threshold,
+                "threshold_reference": threshold_reference,
+                "transition_score_mode": transition_score_mode,
+                "include_first_transition": include_first_transition,
                 "trajectories": trajectory_result,
                 "transitions": transition_result,
             }
@@ -414,6 +670,7 @@ class VisualizationHandler(BaseHTTPRequestHandler):
         body = path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -423,17 +680,19 @@ class VisualizationHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    global DB_PATH, PREDICTION_ROOT, PROCESSED_ROOT
+    global DB_PATH, PREDICTION_ROOT, PROCESSED_ROOT, STATS_ROOT
     parser = argparse.ArgumentParser(description="Serve the trajectory plausibility visualization.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--db-path", default=str(DB_PATH))
     parser.add_argument("--prediction-root", default=str(PREDICTION_ROOT))
     parser.add_argument("--processed-root", default=str(PROCESSED_ROOT))
+    parser.add_argument("--stats-root", default=str(STATS_ROOT))
     args = parser.parse_args()
     DB_PATH = Path(args.db_path)
     PREDICTION_ROOT = Path(args.prediction_root)
     PROCESSED_ROOT = Path(args.processed_root)
+    STATS_ROOT = Path(args.stats_root)
     if not DB_PATH.exists():
         raise FileNotFoundError(f"{DB_PATH} does not exist. Run build_database.py first.")
     server = ThreadingHTTPServer((args.host, args.port), VisualizationHandler)

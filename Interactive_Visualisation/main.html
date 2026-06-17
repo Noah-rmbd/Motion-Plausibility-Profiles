@@ -20,15 +20,8 @@
             <option value="gowalla">Gowalla</option>
             <option value="synthetic">Gowalla (Synthetic Anomalies)</option>
         </select>
-        <select name="model" id="model-select">
-            <option value="">Select a model</option>
-        </select>
-        <div id="threshold-control">
-            <label for="threshold-slider">Anomalies <strong id="threshold-percentage">5.0%</strong></label>
-            <input id="threshold-slider" type="range" min="0.1" max="25" step="0.1" value="5">
-            <span id="threshold-value">Threshold: --</span>
-        </div>
-        <button id="model-info-button" title="Model details">i</button>
+        <button id="model-setup-button">Model</button>
+        <button id="stats-button">Statistics</button>
         <select name="users" id="user-select">
             <option value="">--Please choose a user--</option>
         </select>
@@ -42,10 +35,120 @@
         </div>
 
     </div>
-    <aside id="model-info-panel" hidden>
-        <button id="close-model-info" title="Close">×</button>
-        <h2>Model details</h2>
-        <div id="model-info-content"></div>
+    <aside id="model-setup-panel" hidden>
+        <button id="close-model-setup" title="Close">×</button>
+        <h2>Model pipeline</h2>
+        <section class="model-panel-section model-filter-grid">
+            <label>Architecture<select id="filter-model-type"></select></label>
+            <label>Training population<select id="filter-training-mode"></select></label>
+            <label>Feature combination<select id="filter-feature-representation"></select></label>
+        </section>
+        <section class="model-panel-section">
+            <label>Matching model
+                <select name="model" id="model-select">
+                    <option value="">Select a model</option>
+                </select>
+            </label>
+        </section>
+        <section class="model-panel-section score-controls">
+            <label>
+                Transition error
+                <select id="transition-score-select">
+                    <option value="mean">Feature mean</option>
+                    <option value="weighted">Concept weighted</option>
+                    <option value="mean_no_bearing">Feature mean, no bearing</option>
+                    <option value="weighted_no_bearing">Concept weighted, no bearing</option>
+                    <option value="mean_no_acceleration">Feature mean, no acceleration</option>
+                    <option value="weighted_no_acceleration">Concept weighted, no acceleration</option>
+                </select>
+            </label>
+            <label id="aggregation-control" for="aggregation-select">
+                Trajectory error
+                <select id="aggregation-select">
+                    <option value="mean">Mean error</option>
+                    <option value="max">Maximum error</option>
+                    <option value="top_k">Top 3 mean</option>
+                    <option value="window_max">Max 5-step window</option>
+                </select>
+            </label>
+            <label>
+                First transition
+                <select id="first-transition-select">
+                    <option value="true">Include</option>
+                    <option value="false">Exclude</option>
+                </select>
+            </label>
+            <div id="threshold-control">
+                <label for="threshold-slider">Reference tail <strong id="threshold-percentage">5.0%</strong></label>
+                <input id="threshold-slider" type="range" min="0.1" max="25" step="0.1" value="5">
+                <span id="threshold-value">Threshold: --</span>
+                <span id="threshold-reference"></span>
+            </div>
+        </section>
+        <section id="performance-panel" class="model-panel-section">
+            <div class="performance-heading">
+                <div>
+                    <strong>Synthetic evaluation</strong>
+                    <span id="performance-cutoff">5.0% cutoff</span>
+                </div>
+                <span id="performance-auc"
+                    title="ROC AUC ranks all reference and synthetic scores, so it does not depend on the selected percentile threshold.">AUC
+                    --</span>
+            </div>
+            <p id="metric-reference-label" class="metric-reference">
+                Threshold: unlabeled held-out real scores. Negatives: manually reviewed plausible trajectories.
+            </p>
+            <div id="performance-content">Select a model.</div>
+        </section>
+        <section class="model-panel-section">
+            <h3>Model details</h3>
+            <div id="model-info-content"></div>
+        </section>
+    </aside>
+    <aside id="stats-panel" hidden>
+        <button id="close-stats" title="Close">×</button>
+        <h2>Dataset statistics</h2>
+        <section class="stats-controls">
+            <label>Dataset
+                <select id="stats-dataset">
+                    <option value="inat">iNaturalist</option>
+                    <option value="gowalla">Gowalla</option>
+                </select>
+            </label>
+            <label>Population
+                <select id="stats-subset">
+                    <option value="clean_real">Model-eligible real</option>
+                    <option value="all">Entire dataset</option>
+                    <option value="model_flagged">Flagged by selected model</option>
+                    <option value="model_accepted">Accepted by selected model</option>
+                    <option value="transition_flagged">Flagged transitions by selected model</option>
+                    <option value="transition_accepted">Accepted transitions by selected model</option>
+                </select>
+            </label>
+            <label>Metric
+                <select id="stats-metric">
+                    <option value="speed">Speed</option>
+                    <option value="acceleration">Acceleration</option>
+                    <option value="distance">Distance</option>
+                    <option value="elapsed_time">Elapsed time</option>
+                    <option value="bearing_change">Bearing change</option>
+                    <option value="trajectory_n_transitions">Transitions per trajectory</option>
+                    <option value="max_speed">Maximum trajectory speed</option>
+                    <option value="total_distance">Total trajectory distance</option>
+                    <option value="total_elapsed_time">Total trajectory elapsed time</option>
+                    <option value="model_score">Model anomaly score</option>
+                </select>
+            </label>
+        </section>
+        <section id="stats-summary"></section>
+        <div id="stats-plot"></div>
+        <section id="stats-feature-errors"></section>
+        <section id="stats-quality"></section>
+        <div class="stats-actions">
+            <button id="export-stats-json">JSON</button>
+            <button id="export-stats-csv">CSV</button>
+            <button id="export-stats-png">PNG</button>
+        </div>
     </aside>
     <div id="content-split">
         <div id="map"></div>
@@ -67,6 +170,11 @@
                 <option value="year">Year</option>
                 <option value="smart">Smart Periods</option>
             </select>
+            <div class="timeline-anomaly-key">
+                <span><i class="baseline-key"></i>Physical rule</span>
+                <span><i class="model-key"></i>Model</span>
+                <span><i class="combined-key"></i>Both</span>
+            </div>
         </div>
         <ul id="timeline"></ul>
     </div>

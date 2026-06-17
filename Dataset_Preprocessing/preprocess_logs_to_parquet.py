@@ -6,20 +6,31 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 try:
+    from .sessionization import (
+        DEFAULT_MAX_INACTIVITY_SECONDS,
+        is_session_break,
+    )
     from .utils import compute_bearing
 except ImportError:
+    from sessionization import DEFAULT_MAX_INACTIVITY_SECONDS, is_session_break
     from utils import compute_bearing
 
 
 DEFAULT_INPUTS = {
     "inat": Path("data/raw/iNaturalist/frequent-poster.log"),
     "gowalla": Path("data/raw/gowalla/gowalla_frequent_poster.log"),
+    "diverse": Path("data/raw/Diverse_Datasets/diverse_dataset.log"),
 }
+DEFAULT_DATASETS = ("inat", "gowalla")
 
 FALLBACK_INPUTS = {
     "inat": Path("data/processed/iNaturalist/frequent-poster.log"),
     "gowalla": Path("data/processed/gowalla/gowalla_frequent_poster.log"),
+    "diverse": Path("data/processed/Diverse_Datasets/diverse_dataset.log"),
 }
+
+STATIONARY_SPEED_EPSILON_KMH = 1e-6
+STATIONARY_DISTANCE_EPSILON_M = 1.0
 
 OBSERVATION_SCHEMA = pa.schema(
     [
@@ -43,7 +54,9 @@ TRANSITION_SCHEMA = pa.schema(
         ("elapsed_time_s", pa.float64()),
         ("distance_m", pa.float64()),
         ("acceleration_m_s2", pa.float64()),
+        ("acceleration_valid", pa.bool_()),
         ("bearing_change_rad", pa.float64()),
+        ("bearing_change_valid", pa.bool_()),
         ("transition_plausibility", pa.int8()),
         ("plausibility_reason", pa.string()),
     ]
@@ -122,6 +135,20 @@ def normalize_bearing_delta(delta):
 
 
 def transition_plausibility(speed_kmh, elapsed_time_s, distance_m, acceleration_m_s2):
+    values = (speed_kmh, elapsed_time_s, distance_m, acceleration_m_s2)
+    if not all(math.isfinite(value) for value in values):
+        return 0, "Transition contains a non-finite value"
+    if elapsed_time_s <= 0.0:
+        return 0, "Elapsed time must be positive"
+    if distance_m < 0.0:
+        return 0, "Distance must be non-negative"
+    if speed_kmh < 0.0:
+        return 0, "Speed must be non-negative"
+    if (
+        speed_kmh <= STATIONARY_SPEED_EPSILON_KMH
+        and distance_m > STATIONARY_DISTANCE_EPSILON_M
+    ):
+        return 0, "Non-zero distance with stationary speed"
     if speed_kmh > 900.0:
         return 0, "Too high speed"
     if elapsed_time_s > 86400.0:
@@ -156,7 +183,13 @@ def observation_row(dataset, user_id, observation_id, date, time, lat, lon, is_o
     }
 
 
-def preprocess_log(dataset, input_path, output_dir, batch_size=100_000):
+def preprocess_log(
+    dataset,
+    input_path,
+    output_dir,
+    batch_size=100_000,
+    max_inactivity_seconds=DEFAULT_MAX_INACTIVITY_SECONDS,
+):
     input_path = Path(input_path)
     output_dir = Path(output_dir) / dataset
     if not input_path.exists():
@@ -177,6 +210,7 @@ def preprocess_log(dataset, input_path, output_dir, batch_size=100_000):
     transition_id = 0
     trajectory_id = 0
     pending_transitions = []
+    session_breaks = 0
 
     def finish_trajectory():
         nonlocal trajectory_id, pending_transitions
@@ -251,7 +285,7 @@ def preprocess_log(dataset, input_path, output_dir, batch_size=100_000):
                     "observation_id": observation_id,
                     "lat": lat,
                     "lon": lon,
-                    "speed_ms": 0.0,
+                    "speed_ms": None,
                     "bearing": None,
                 }
                 continue
@@ -264,6 +298,18 @@ def preprocess_log(dataset, input_path, output_dir, batch_size=100_000):
             if elapsed_time_s is None or distance_m is None:
                 continue
 
+            if is_session_break(elapsed_time_s, max_inactivity_seconds):
+                finish_trajectory()
+                session_breaks += 1
+                previous_point = {
+                    "observation_id": observation_id,
+                    "lat": lat,
+                    "lon": lon,
+                    "speed_ms": None,
+                    "bearing": None,
+                }
+                continue
+
             if elapsed_time_s > 0:
                 speed_kmh = (distance_m / elapsed_time_s) * 3.6
             else:
@@ -272,17 +318,24 @@ def preprocess_log(dataset, input_path, output_dir, batch_size=100_000):
                     speed_kmh = 0.0
 
             speed_ms = speed_kmh / 3.6
+            acceleration_valid = previous_point["speed_ms"] is not None and elapsed_time_s > 0
             acceleration_m_s2 = (
                 (speed_ms - previous_point["speed_ms"]) / elapsed_time_s
-                if elapsed_time_s > 0
+                if acceleration_valid
                 else 0.0
             )
 
-            bearing = compute_bearing(previous_point["lat"], previous_point["lon"], lat, lon)
-            if previous_point["bearing"] is None:
-                bearing_change_rad = 0.0
-            else:
+            has_motion = distance_m > 1e-3
+            bearing = (
+                compute_bearing(previous_point["lat"], previous_point["lon"], lat, lon)
+                if has_motion
+                else None
+            )
+            bearing_change_valid = bearing is not None and previous_point["bearing"] is not None
+            if bearing_change_valid:
                 bearing_change_rad = normalize_bearing_delta(bearing - previous_point["bearing"])
+            else:
+                bearing_change_rad = 0.0
 
             plausible, reason = transition_plausibility(
                 speed_kmh,
@@ -301,7 +354,9 @@ def preprocess_log(dataset, input_path, output_dir, batch_size=100_000):
                     "elapsed_time_s": elapsed_time_s,
                     "distance_m": distance_m,
                     "acceleration_m_s2": acceleration_m_s2,
+                    "acceleration_valid": acceleration_valid,
                     "bearing_change_rad": bearing_change_rad,
+                    "bearing_change_valid": bearing_change_valid,
                     "transition_plausibility": plausible,
                     "plausibility_reason": reason,
                 }
@@ -328,10 +383,11 @@ def preprocess_log(dataset, input_path, output_dir, batch_size=100_000):
         "transitions": transitions.count,
         "trajectories": trajectories.count,
         "trajectory_transitions": trajectory_transitions.count,
+        "session_breaks": session_breaks,
     }
 
 
-def preprocess_many(datasets, output_dir, batch_size):
+def preprocess_many(datasets, output_dir, batch_size, max_inactivity_seconds):
     results = {}
     for dataset, input_path in datasets.items():
         print(f"Preprocessing {dataset}: {input_path}")
@@ -340,6 +396,7 @@ def preprocess_many(datasets, output_dir, batch_size):
             input_path=input_path,
             output_dir=output_dir,
             batch_size=batch_size,
+            max_inactivity_seconds=max_inactivity_seconds,
         )
         print(f"  {results[dataset]}")
     return results
@@ -348,7 +405,8 @@ def preprocess_many(datasets, output_dir, batch_size):
 def parse_dataset_args(values):
     if not values:
         datasets = {}
-        for name, default_path in DEFAULT_INPUTS.items():
+        for name in DEFAULT_DATASETS:
+            default_path = DEFAULT_INPUTS[name]
             datasets[name] = default_path if default_path.exists() else FALLBACK_INPUTS[name]
         return datasets
 
@@ -381,10 +439,29 @@ def main():
         default=100_000,
         help="Number of rows per Parquet write batch.",
     )
+    parser.add_argument(
+        "--max-inactivity-hours",
+        type=float,
+        default=DEFAULT_MAX_INACTIVITY_SECONDS / 3600,
+        help=(
+            "Start a new trajectory after this observation gap. "
+            "The gap transition is not treated as movement. Use 0 to disable."
+        ),
+    )
     args = parser.parse_args()
 
     datasets = parse_dataset_args(args.dataset)
-    preprocess_many(datasets, args.output_dir, args.batch_size)
+    max_inactivity_seconds = (
+        args.max_inactivity_hours * 3600
+        if args.max_inactivity_hours > 0
+        else None
+    )
+    preprocess_many(
+        datasets,
+        args.output_dir,
+        args.batch_size,
+        max_inactivity_seconds,
+    )
 
 
 if __name__ == "__main__":

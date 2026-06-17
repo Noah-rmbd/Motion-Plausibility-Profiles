@@ -81,5 +81,65 @@ Then you can open in your browser the following url :
 http://127.0.0.1:8001
 ```
 
+## Rebuilding the ML pipeline
+
+Preview every stage without changing artifacts:
+
+```bash
+python pipeline.py --dry-run
+```
+
+Run the complete canonical pipeline:
+
+```bash
+python pipeline.py
+```
+
+Resume from model training after preprocessing and feature generation:
+
+```bash
+python pipeline.py --from-stage models
+```
+
+Train only the T-LSTM experiment matrix:
+
+```bash
+python -m modeling.experiments modeling/configs/t_lstm_experiments.json
+```
+
+Train only the T-LSTM sequence-to-sequence matrix:
+
+```bash
+python -m modeling.experiments modeling/configs/t_lstm_seq2seq_experiments.json
+python build_database.py --comparison-group configurable_pipeline_v2
+```
+
+Train the jointly optimized paper-style LAGMM models:
+
+```bash
+python -m modeling.experiments modeling/configs/lagmm_experiments.json
+python build_database.py --comparison-group configurable_pipeline_v2
+```
+
+After regenerating synthetic anomalies, reevaluate every compatible current model
+without retraining:
+
+```bash
+python -m modeling.cli evaluate-all \
+  --datasets synthetic \
+  --feature-set motion_v2 \
+  --comparison-group configurable_pipeline_v2 \
+  --reference-datasets inat gowalla
+python build_database.py --comparison-group configurable_pipeline_v2
+```
+
+Run only preprocessing through feature generation:
+
+```bash
+python pipeline.py --to-stage features
+```
+
+The expensive model stage can be omitted with `--skip models`.
+
 ## Files produced
 The script produces the visual representations of Fig. 17, 20, 34–36, and 68–72 of the paper (but adjusted to the newly downloaded data). The Motion Plausibility Profiles are separated into the main representation (```*.pdf```) and the respective histogram (```*-histogram.pdf```), i.e., in two separate files. Also, the script produces two versions of the main representation, one more squarish one (```*.pdf```) and one with a more landscape format (```*-wide.pdf```).
