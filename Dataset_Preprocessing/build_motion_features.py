@@ -15,12 +15,23 @@ try:
         DEFAULT_SPLIT_SEED,
         user_split,
     )
+    from modeling.plausible_labels import (
+        DEFAULT_LABEL_PATH,
+        resolve_plausible_trajectories_from_processed,
+    )
 except ImportError:
+    import sys
+
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
     from cleaning import build_trajectory_exclusions, select_valid_trajectory_ids
     from splitting import (
         DEFAULT_CALIBRATION_FRACTION,
         DEFAULT_SPLIT_SEED,
         user_split,
+    )
+    from modeling.plausible_labels import (
+        DEFAULT_LABEL_PATH,
+        resolve_plausible_trajectories_from_processed,
     )
 
 
@@ -154,6 +165,7 @@ def build_real_feature_dataset(
     min_transitions,
     calibration_fraction,
     split_seed,
+    plausible_labels_path,
 ):
     transitions, trajectory_transitions, trajectories = read_real_dataset(processed_dir, dataset)
     valid_ids, exclusions = select_valid_real_trajectories(
@@ -192,6 +204,23 @@ def build_real_feature_dataset(
         calibration_fraction,
         split_seed,
     )
+    reviewed_plausible_ids = set()
+    if plausible_labels_path and Path(plausible_labels_path).exists():
+        reviewed = resolve_plausible_trajectories_from_processed(
+            processed_root=processed_dir,
+            label_path=plausible_labels_path,
+        )
+        reviewed_plausible_ids = set(
+            reviewed.loc[
+                reviewed["dataset"].astype(str).eq(str(dataset)),
+                "trajectory_id",
+            ].astype(int)
+        )
+        reviewed_plausible_ids &= set(trajectory_features["trajectory_id"])
+        trajectory_features.loc[
+            trajectory_features["trajectory_id"].isin(reviewed_plausible_ids),
+            "split",
+        ] = "calibration"
     trajectory_features["use_for_training"] = trajectory_features["split"].eq("fit")
     trajectory_features["use_for_calibration"] = trajectory_features["split"].eq(
         "calibration"
@@ -211,6 +240,7 @@ def build_real_feature_dataset(
         "valid_trajectories": int(len(trajectory_features)),
         "valid_transitions": int(len(transition_features)),
         "excluded_trajectories": int(len(exclusions)),
+        "reviewed_plausible_trajectories": int(len(reviewed_plausible_ids)),
     }, exclusions
 
 
@@ -295,6 +325,7 @@ def main():
         default=DEFAULT_CALIBRATION_FRACTION,
     )
     parser.add_argument("--split-seed", type=int, default=DEFAULT_SPLIT_SEED)
+    parser.add_argument("--plausible-labels", default=str(DEFAULT_LABEL_PATH))
     parser.add_argument("--datasets", nargs="+", default=DEFAULT_DATASETS)
     parser.add_argument("--skip-synthetic", action="store_true")
     args = parser.parse_args()
@@ -312,6 +343,7 @@ def main():
             args.min_transitions,
             args.calibration_fraction,
             args.split_seed,
+            args.plausible_labels,
         )
         summaries.append(summary)
         all_exclusions.append(exclusions)
@@ -336,8 +368,12 @@ def main():
         "min_transitions": args.min_transitions,
         "calibration_fraction": args.calibration_fraction,
         "split_seed": args.split_seed,
+        "plausible_labels": args.plausible_labels,
         "cleaning_policy": {
-            "real_training_data": "trajectory has at least min_transitions and all transitions are rule-plausible",
+            "real_training_data": (
+                "trajectory has at least min_transitions, all transitions are "
+                "rule-plausible, and is not manually reviewed plausible"
+            ),
             "synthetic_data": "same deterministic feature transform; never used to fit model scalers",
         },
         "scaling_policy": (

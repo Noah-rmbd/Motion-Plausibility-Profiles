@@ -10,153 +10,212 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
-    <script src="script.js"></script>
+    <script src="js/state.js"></script>
+    <script src="js/utils.js"></script>
+    <script src="js/stats.js"></script>
+    <script src="js/models.js"></script>
+    <script src="js/data.js"></script>
+    <script src="js/profile.js"></script>
+    <script src="js/map.js"></script>
+    <script src="js/timeline.js"></script>
+    <script src="js/app.js"></script>
 </head>
 
 <body>
     <div id="header">
-        <select name="database" id="database-select">
-            <option value="original">iNaturalist</option>
-            <option value="gowalla">Gowalla</option>
-            <option value="synthetic">Gowalla (Synthetic Anomalies)</option>
-        </select>
-        <button id="model-setup-button">Model</button>
-        <button id="stats-button">Statistics</button>
-        <select name="users" id="user-select">
-            <option value="">--Please choose a user--</option>
-        </select>
-        <div id="toggles-container">
-            <label id="toggle-container">
-                <input type="checkbox" id="animate-path"> Animate Route Progressively
-            </label>
-            <label id="toggle-container" style="margin-left: 15px;">
-                <input type="checkbox" id="colorblind-toggle"> Color Deficient Mode
-            </label>
+        <div class="toolbar-section toolbar-left">
+            <div id="left-panel-tabs" class="toolbar-tabs" role="tablist" aria-label="Left panel">
+                <button id="left-panel-map-tab" class="toolbar-tab" type="button" data-left-panel-view="map" role="tab"
+                    aria-controls="left-panel-map-view" aria-selected="false">
+                    Map display
+                </button>
+                <button id="left-panel-model-tab" class="toolbar-tab" type="button" data-left-panel-view="model"
+                    role="tab" aria-controls="left-panel-model-view" aria-selected="false">
+                    Model configuration
+                </button>
+            </div>
         </div>
-
+        <div class="toolbar-section toolbar-center">
+            <button id="mark-plausible-button"
+                title="Store selected timeline trajectories as manually reviewed plausible examples">
+                Mark plausible
+            </button>
+            <span id="plausible-label-status"></span>
+        </div>
+        <div class="toolbar-section toolbar-right">
+            <div id="right-panel-tabs" class="toolbar-tabs" role="tablist" aria-label="Right panel">
+                <button id="right-panel-stats-tab" class="toolbar-tab" type="button" data-panel-view="stats" role="tab"
+                    aria-controls="stats-panel" aria-selected="false">
+                    Stats
+                </button>
+                <button id="right-panel-mpp-tab" class="toolbar-tab" type="button" data-panel-view="mpp" role="tab"
+                    aria-controls="mpp-panel-view" aria-selected="false">
+                    MPP
+                </button>
+            </div>
+        </div>
     </div>
-    <aside id="model-setup-panel" hidden>
-        <button id="close-model-setup" title="Close">×</button>
-        <h2>Model pipeline</h2>
-        <section class="model-panel-section model-filter-grid">
-            <label>Architecture<select id="filter-model-type"></select></label>
-            <label>Training population<select id="filter-training-mode"></select></label>
-            <label>Feature combination<select id="filter-feature-representation"></select></label>
-        </section>
-        <section class="model-panel-section">
-            <label>Matching model
-                <select name="model" id="model-select">
-                    <option value="">Select a model</option>
-                </select>
-            </label>
-        </section>
-        <section class="model-panel-section score-controls">
-            <label>
-                Transition error
-                <select id="transition-score-select">
-                    <option value="mean">Feature mean</option>
-                    <option value="weighted">Concept weighted</option>
-                    <option value="mean_no_bearing">Feature mean, no bearing</option>
-                    <option value="weighted_no_bearing">Concept weighted, no bearing</option>
-                    <option value="mean_no_acceleration">Feature mean, no acceleration</option>
-                    <option value="weighted_no_acceleration">Concept weighted, no acceleration</option>
-                </select>
-            </label>
-            <label id="aggregation-control" for="aggregation-select">
-                Trajectory error
-                <select id="aggregation-select">
-                    <option value="mean">Mean error</option>
-                    <option value="max">Maximum error</option>
-                    <option value="top_k">Top 3 mean</option>
-                    <option value="window_max">Max 5-step window</option>
-                </select>
-            </label>
-            <label>
-                First transition
-                <select id="first-transition-select">
-                    <option value="true">Include</option>
-                    <option value="false">Exclude</option>
-                </select>
-            </label>
-            <div id="threshold-control">
-                <label for="threshold-slider">Reference tail <strong id="threshold-percentage">5.0%</strong></label>
-                <input id="threshold-slider" type="range" min="0.1" max="25" step="0.1" value="5">
-                <span id="threshold-value">Threshold: --</span>
-                <span id="threshold-reference"></span>
-            </div>
-        </section>
-        <section id="performance-panel" class="model-panel-section">
-            <div class="performance-heading">
-                <div>
-                    <strong>Synthetic evaluation</strong>
-                    <span id="performance-cutoff">5.0% cutoff</span>
-                </div>
-                <span id="performance-auc"
-                    title="ROC AUC ranks all reference and synthetic scores, so it does not depend on the selected percentile threshold.">AUC
-                    --</span>
-            </div>
-            <p id="metric-reference-label" class="metric-reference">
-                Threshold: unlabeled held-out real scores. Negatives: manually reviewed plausible trajectories.
-            </p>
-            <div id="performance-content">Select a model.</div>
-        </section>
-        <section class="model-panel-section">
-            <h3>Model details</h3>
-            <div id="model-info-content"></div>
-        </section>
-    </aside>
-    <aside id="stats-panel" hidden>
-        <button id="close-stats" title="Close">×</button>
-        <h2>Dataset statistics</h2>
-        <section class="stats-controls">
-            <label>Dataset
-                <select id="stats-dataset">
-                    <option value="inat">iNaturalist</option>
-                    <option value="gowalla">Gowalla</option>
-                </select>
-            </label>
-            <label>Population
-                <select id="stats-subset">
-                    <option value="clean_real">Model-eligible real</option>
-                    <option value="all">Entire dataset</option>
-                    <option value="model_flagged">Flagged by selected model</option>
-                    <option value="model_accepted">Accepted by selected model</option>
-                    <option value="transition_flagged">Flagged transitions by selected model</option>
-                    <option value="transition_accepted">Accepted transitions by selected model</option>
-                </select>
-            </label>
-            <label>Metric
-                <select id="stats-metric">
-                    <option value="speed">Speed</option>
-                    <option value="acceleration">Acceleration</option>
-                    <option value="distance">Distance</option>
-                    <option value="elapsed_time">Elapsed time</option>
-                    <option value="bearing_change">Bearing change</option>
-                    <option value="trajectory_n_transitions">Transitions per trajectory</option>
-                    <option value="max_speed">Maximum trajectory speed</option>
-                    <option value="total_distance">Total trajectory distance</option>
-                    <option value="total_elapsed_time">Total trajectory elapsed time</option>
-                    <option value="model_score">Model anomaly score</option>
-                </select>
-            </label>
-        </section>
-        <section id="stats-summary"></section>
-        <div id="stats-plot"></div>
-        <section id="stats-feature-errors"></section>
-        <section id="stats-quality"></section>
-        <div class="stats-actions">
-            <button id="export-stats-json">JSON</button>
-            <button id="export-stats-csv">CSV</button>
-            <button id="export-stats-png">PNG</button>
-        </div>
-    </aside>
     <div id="content-split">
+        <aside id="left-panel" hidden>
+            <button id="close-left-panel" title="Close">×</button>
+            <section id="left-panel-model-view" class="left-panel-view" role="tabpanel"
+                aria-labelledby="left-panel-model-tab">
+                <h2>Model pipeline</h2>
+                <section class="model-panel-section model-filter-grid">
+                    <label>Architecture<select id="filter-model-type"></select></label>
+                    <label>Training population<select id="filter-training-mode"></select></label>
+                    <label>Feature combination<select id="filter-feature-representation"></select></label>
+                </section>
+                <section class="model-panel-section">
+                    <label>Matching model
+                        <select name="model" id="model-select">
+                            <option value="">Select a model</option>
+                        </select>
+                    </label>
+                </section>
+                <section class="model-panel-section score-controls">
+                    <label>
+                        Transition error
+                        <select id="transition-score-select">
+                            <option value="mean">Feature mean</option>
+                            <option value="weighted">Concept weighted</option>
+                            <option value="mean_no_bearing">Feature mean, no bearing</option>
+                            <option value="weighted_no_bearing">Concept weighted, no bearing</option>
+                            <option value="mean_no_acceleration">Feature mean, no acceleration</option>
+                            <option value="weighted_no_acceleration">Concept weighted, no acceleration</option>
+                        </select>
+                    </label>
+                    <label id="aggregation-control" for="aggregation-select">
+                        Trajectory error
+                        <select id="aggregation-select">
+                            <option value="mean">Mean error</option>
+                            <option value="max">Maximum error</option>
+                            <option value="top_k">Top 3 mean</option>
+                            <option value="window_max">Max 5-step window</option>
+                        </select>
+                    </label>
+                    <label>
+                        First transition
+                        <select id="first-transition-select">
+                            <option value="true">Include</option>
+                            <option value="false">Exclude</option>
+                        </select>
+                    </label>
+                    <div id="transition-feature-control">
+                        <div class="control-heading">Error features</div>
+                        <div id="transition-feature-options"></div>
+                    </div>
+                    <div id="threshold-control">
+                        <label for="threshold-slider">Reference tail <strong
+                                id="threshold-percentage">5.0%</strong></label>
+                        <input id="threshold-slider" type="range" min="0.1" max="25" step="0.1" value="5">
+                        <span id="threshold-value">Threshold: --</span>
+                        <span id="threshold-reference"></span>
+                    </div>
+                </section>
+                <section id="performance-panel" class="model-panel-section">
+                    <div class="performance-heading">
+                        <div>
+                            <strong>Synthetic evaluation</strong>
+                            <span id="performance-cutoff">5.0% cutoff</span>
+                        </div>
+                        <span id="performance-auc"
+                            title="ROC AUC ranks all reference and synthetic scores, so it does not depend on the selected percentile threshold.">AUC
+                            --</span>
+                    </div>
+                    <p id="metric-reference-label" class="metric-reference">
+                        Threshold: unlabeled held-out real scores. Negatives: manually reviewed plausible trajectories.
+                    </p>
+                    <div id="performance-content">Select a model.</div>
+                </section>
+                <section class="model-panel-section">
+                    <h3>Model details</h3>
+                    <div id="model-info-content"></div>
+                </section>
+            </section>
+            <section id="left-panel-map-view" class="left-panel-view" role="tabpanel"
+                aria-labelledby="left-panel-map-tab">
+                <h2>Map display</h2>
+                <section class="model-panel-section map-display-controls">
+                    <label>
+                        <input type="radio" name="map-view-mode" value="user" checked>
+                        User view
+                    </label>
+                    <label>
+                        <input type="checkbox" id="animate-path">
+                        Animate route progressively
+                    </label>
+                    <label>
+                        <input type="checkbox" id="colorblind-toggle">
+                        Color deficient mode
+                    </label>
+                </section>
+                <select name="database" id="database-select">
+                    <option value="original">iNaturalist</option>
+                    <option value="gowalla">Gowalla</option>
+                    <option value="synthetic">Gowalla (Synthetic Anomalies)</option>
+                </select>
+                <select name="users" id="user-select">
+                    <option value="">--Please choose a user--</option>
+                </select>
+            </section>
+        </aside>
         <div id="map"></div>
         <div id="resizer">
             <button id="toggle-profile" onclick="toggleProfile()">▶</button>
         </div>
-        <div id="chart-container">
-            <div id="mppPlotly"></div>
+        <div id="chart-container" class="hidden">
+            <section id="mpp-panel-view" class="right-panel-view" role="tabpanel" aria-labelledby="right-panel-mpp-tab">
+                <h2>Motion Plausibility Profile</h2>
+                <div id="mpp-empty-state" class="panel-empty-state" hidden>
+                    Select the Map display tab, choose User view, then select a user.
+                </div>
+                <div id="mppPlotly"></div>
+            </section>
+            <section id="stats-panel" class="right-panel-view" role="tabpanel" aria-labelledby="right-panel-stats-tab">
+                <h2>Dataset statistics</h2>
+                <section class="stats-controls">
+                    <label>Dataset
+                        <select id="stats-dataset">
+                            <option value="inat">iNaturalist</option>
+                            <option value="gowalla">Gowalla</option>
+                        </select>
+                    </label>
+                    <label>Population
+                        <select id="stats-subset">
+                            <option value="clean_real">Model-eligible real</option>
+                            <option value="all">Entire dataset</option>
+                            <option value="model_flagged">Flagged by selected model</option>
+                            <option value="model_accepted">Accepted by selected model</option>
+                            <option value="transition_flagged">Flagged transitions by selected model</option>
+                            <option value="transition_accepted">Accepted transitions by selected model</option>
+                        </select>
+                    </label>
+                    <label>Metric
+                        <select id="stats-metric">
+                            <option value="speed">Speed</option>
+                            <option value="acceleration">Acceleration</option>
+                            <option value="distance">Distance</option>
+                            <option value="elapsed_time">Elapsed time</option>
+                            <option value="bearing_change">Bearing change</option>
+                            <option value="trajectory_n_transitions">Transitions per trajectory</option>
+                            <option value="max_speed">Maximum trajectory speed</option>
+                            <option value="total_distance">Total trajectory distance</option>
+                            <option value="total_elapsed_time">Total trajectory elapsed time</option>
+                            <option value="model_score">Model anomaly score</option>
+                        </select>
+                    </label>
+                </section>
+                <section id="stats-summary"></section>
+                <div id="stats-plot"></div>
+                <section id="stats-feature-errors"></section>
+                <section id="stats-quality"></section>
+                <div class="stats-actions">
+                    <button id="export-stats-json">JSON</button>
+                    <button id="export-stats-csv">CSV</button>
+                    <button id="export-stats-png">PNG</button>
+                </div>
+            </section>
         </div>
     </div>
     <div id="timeline-container">
@@ -174,6 +233,7 @@
                 <span><i class="baseline-key"></i>Physical rule</span>
                 <span><i class="model-key"></i>Model</span>
                 <span><i class="combined-key"></i>Both</span>
+                <span><i class="plausible-key"></i>Reviewed plausible</span>
             </div>
         </div>
         <ul id="timeline"></ul>

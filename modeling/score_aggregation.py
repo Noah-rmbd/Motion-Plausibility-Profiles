@@ -24,6 +24,10 @@ def feature_error_columns(frame):
     return [column for column in frame.columns if column.startswith("error_")]
 
 
+def feature_error_column(feature_name):
+    return f"error_{feature_name}"
+
+
 def feature_group(feature_name):
     if feature_name.startswith("speed_"):
         return "speed_profile"
@@ -47,14 +51,26 @@ def excluded_feature_groups(mode):
     return groups
 
 
-def transition_error_scores(transition_scores, mode="mean"):
+def selected_feature_error_columns(
+    transition_scores,
+    mode="mean",
+    included_features=None,
+):
     if mode not in TRANSITION_SCORE_MODES:
         raise ValueError(f"Unknown transition score mode: {mode}")
     error_columns = feature_error_columns(transition_scores)
-    if not error_columns:
-        if "score" not in transition_scores:
-            raise ValueError("Transition scores contain no feature-wise errors")
-        return transition_scores["score"].astype(float)
+    if included_features is not None:
+        requested_columns = [
+            feature_error_column(feature)
+            for feature in included_features
+        ]
+        missing = sorted(set(requested_columns) - set(error_columns))
+        if missing:
+            raise ValueError(
+                "Transition scores are missing requested feature-error columns: "
+                + ", ".join(column.removeprefix("error_") for column in missing)
+            )
+        error_columns = requested_columns
     excluded_groups = excluded_feature_groups(mode)
     error_columns = [
         column
@@ -63,6 +79,22 @@ def transition_error_scores(transition_scores, mode="mean"):
     ]
     if not error_columns:
         raise ValueError(f"{mode} excludes every available feature-error column")
+    return error_columns
+
+
+def transition_error_scores(transition_scores, mode="mean", included_features=None):
+    if mode not in TRANSITION_SCORE_MODES:
+        raise ValueError(f"Unknown transition score mode: {mode}")
+    error_columns = feature_error_columns(transition_scores)
+    if not error_columns:
+        if "score" not in transition_scores:
+            raise ValueError("Transition scores contain no feature-wise errors")
+        return transition_scores["score"].astype(float)
+    error_columns = selected_feature_error_columns(
+        transition_scores,
+        mode=mode,
+        included_features=included_features,
+    )
     if score_mode_base(mode) == "mean":
         return pd.Series(
             transition_scores[error_columns].to_numpy(dtype=float).mean(axis=1),
@@ -101,11 +133,13 @@ def aggregate_transition_scores(
     top_k=DEFAULT_TOP_K,
     window_size=DEFAULT_WINDOW_SIZE,
     transition_score_mode="mean",
+    included_features=None,
 ):
     frame = transition_scores[["trajectory_id", "transition_order"]].copy()
     frame["score"] = transition_error_scores(
         transition_scores,
         mode=transition_score_mode,
+        included_features=included_features,
     ).to_numpy()
     if ignore_first_transition:
         eligible = frame.loc[frame["transition_order"] > 0]
@@ -158,6 +192,7 @@ def select_trajectory_scores(
     aggregation="mean",
     ignore_first_transition=True,
     transition_score_mode="mean",
+    included_features=None,
 ):
     if aggregation not in AGGREGATION_COLUMNS:
         raise ValueError(f"Unknown trajectory aggregation: {aggregation}")
@@ -170,6 +205,7 @@ def select_trajectory_scores(
         transition_scores,
         ignore_first_transition=ignore_first_transition,
         transition_score_mode=transition_score_mode,
+        included_features=included_features,
     )[["trajectory_id", score_column]].rename(
         columns={score_column: "selected_score"}
     )

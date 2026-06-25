@@ -59,6 +59,7 @@ CREATE TABLE models (
     training_json TEXT NOT NULL,
     evaluation_json TEXT NOT NULL,
     experiment_json TEXT NOT NULL,
+    prediction_root TEXT NOT NULL,
     final_loss REAL
 );
 
@@ -194,11 +195,13 @@ def import_models(
     comparison_group=None,
     datasets=None,
     model_ids=None,
+    model_types=None,
 ):
     model_root = Path(model_root)
     prediction_root = Path(prediction_root)
     allowed_datasets = set(datasets or [])
     allowed_model_ids = set(model_ids or [])
+    allowed_model_types = set(model_types or [])
     for config_path in sorted(model_root.glob("*/config.json")):
         model_dir = config_path.parent
         model_id = model_dir.name
@@ -209,6 +212,8 @@ def import_models(
             continue
         with config_path.open("r", encoding="utf-8") as handle:
             config = json.load(handle)
+        if allowed_model_types and config.get("model_type") not in allowed_model_types:
+            continue
         if (
             comparison_group
             and config.get("experiment", {}).get("comparison_group")
@@ -226,7 +231,7 @@ def import_models(
             if not history.empty:
                 final_loss = float(history.iloc[-1]["loss"])
         conn.execute(
-            "INSERT INTO models VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO models VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 model_id,
                 config["model_type"],
@@ -236,6 +241,7 @@ def import_models(
                 json.dumps(config["training"]),
                 json.dumps(config["evaluation"]),
                 json.dumps(config.get("experiment", {})),
+                str(prediction_root),
                 final_loss,
             ),
         )
@@ -363,38 +369,67 @@ def build_database(
     comparison_group,
     datasets,
     experiment_config=None,
+    model_ids=None,
+    model_types=None,
+    artifact_sources=None,
 ):
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = db_path.with_suffix(f"{db_path.suffix}.tmp")
     temp_path.unlink(missing_ok=True)
-    model_ids = None
+    selected_model_ids = set(model_ids or [])
+    indexed_model_ids = None
     if experiment_config:
         experiment_path = Path(experiment_config)
         with experiment_path.open("r", encoding="utf-8") as handle:
             experiment = json.load(handle)
-        model_ids = [run["model_id"] for run in expanded_runs(experiment)]
+        indexed_model_ids = [run["model_id"] for run in expanded_runs(experiment)]
+    if selected_model_ids:
+        if indexed_model_ids is None:
+            indexed_model_ids = sorted(selected_model_ids)
+        else:
+            indexed_model_ids = [
+                model_id
+                for model_id in indexed_model_ids
+                if model_id in selected_model_ids
+            ]
+    sources = artifact_sources or [(model_root, prediction_root)]
 
     conn = sqlite3.connect(temp_path)
     try:
         conn.executescript(SCHEMA)
         for dataset in datasets:
             import_dataset(conn, processed_root, dataset)
-        import_models(
-            conn,
-            model_root,
-            prediction_root,
-            feature_root,
-            comparison_group,
-            datasets,
-            model_ids,
-        )
+        for source_model_root, source_prediction_root in sources:
+            import_models(
+                conn,
+                source_model_root,
+                source_prediction_root,
+                feature_root,
+                comparison_group,
+                datasets,
+                indexed_model_ids,
+                model_types,
+            )
         conn.execute("ANALYZE")
         conn.commit()
     finally:
         conn.close()
     temp_path.replace(db_path)
     print(f"Built visualization database: {db_path}")
+
+
+def parse_artifact_source(value):
+    if "=" not in value:
+        raise argparse.ArgumentTypeError(
+            "--artifact-source must be formatted as model_root=prediction_root"
+        )
+    model_root, prediction_root = value.split("=", 1)
+    if not model_root or not prediction_root:
+        raise argparse.ArgumentTypeError(
+            "--artifact-source requires both model_root and prediction_root"
+        )
+    return model_root, prediction_root
 
 
 def main():
@@ -405,6 +440,15 @@ def main():
     parser.add_argument("--processed-root", default="data/processed_parquet")
     parser.add_argument("--model-root", default="artifacts/models")
     parser.add_argument("--prediction-root", default="artifacts/predictions")
+    parser.add_argument(
+        "--artifact-source",
+        action="append",
+        type=parse_artifact_source,
+        help=(
+            "Additional artifact source formatted as model_root=prediction_root. "
+            "Can be repeated to build one DB containing models from multiple runs."
+        ),
+    )
     parser.add_argument("--feature-root", default="data/features")
     parser.add_argument(
         "--comparison-group",
@@ -418,6 +462,16 @@ def main():
             "Only index model IDs expanded from this experiment config. "
             "Use an empty value to index every artifact matching --comparison-group."
         ),
+    )
+    parser.add_argument(
+        "--model-id",
+        nargs="+",
+        help="Only index these model IDs. When used with --experiment-config, the filters are intersected.",
+    )
+    parser.add_argument(
+        "--model-type",
+        nargs="+",
+        help="Only index models whose model_type matches one of these values.",
     )
     parser.add_argument(
         "--datasets",
@@ -434,6 +488,9 @@ def main():
         comparison_group=args.comparison_group or None,
         datasets=args.datasets,
         experiment_config=args.experiment_config or None,
+        model_ids=args.model_id,
+        model_types=args.model_type,
+        artifact_sources=args.artifact_source,
     )
 
 

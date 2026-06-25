@@ -289,6 +289,12 @@ Generated rows follow the canonical schemas. Speed and acceleration are recomput
 after injection, locations are propagated from distance and bearing, and timestamps
 advance by elapsed time.
 
+After injection and session trimming, every synthetic transition is checked again
+with the same deterministic plausibility policy used for real preprocessing. A
+generated trajectory with any rule violation is retried and ultimately rejected
+rather than written to the synthetic benchmark. This keeps synthetic profiles as ML
+benchmark anomalies, not deterministic-rule positives.
+
 Synthetic-only ground truth and provenance stay in a separate lightweight table:
 
 ```text
@@ -998,6 +1004,14 @@ It includes all eligible trajectories from iNaturalist user `98904` and the revi
 dates from Gowalla user `16936`. It is a negative-only diagnostic cohort, so it can
 estimate false-positive behavior but cannot establish precision on real data.
 
+The interactive visualization can append exact trajectory-level reviewed labels to
+the same CSV. Those rows keep `dataset`, `user_id`, and `start_date` for readability
+and also store `trajectory_id`, `source`, `created_at`, and optional `notes`. On the
+next feature rebuild, reviewed plausible trajectories are forced into calibration
+and `use_for_training = false`, even if their user split would otherwise put them in
+the fit population. The UI endpoint rejects synthetic trajectories, zero-transition
+trajectories, and trajectories with deterministic-rule violations.
+
 One threshold from the selected reference is applied to every synthetic anomaly
 profile. No profile receives its own threshold. ROC AUC is calculated from the complete
 score ranking and therefore does not change with the percentile slider. Precision,
@@ -1239,6 +1253,11 @@ in the visualization. Benchmark code explicitly joins real scores to
 `use_for_calibration = true`; fit trajectories therefore do not enter metric
 denominators. Synthetic trajectories are benchmark-only and are never used for a
 scaler, model fit, or real threshold calibration.
+
+Manually reviewed plausible trajectories are a protected subset of calibration.
+They are excluded from training/scaler fitting, excluded from threshold selection
+when benchmark metrics are computed, and used as labeled negatives for false-positive
+diagnostics.
 
 ## Sequence Length
 

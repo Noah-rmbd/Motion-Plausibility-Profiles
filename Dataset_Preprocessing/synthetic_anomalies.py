@@ -26,7 +26,14 @@ try:
     )
     from .splitting import user_split
     from .utils import compute_bearing
+    from modeling.plausible_labels import (
+        DEFAULT_LABEL_PATH,
+        resolve_plausible_trajectories_from_processed,
+    )
 except ImportError:
+    import sys
+
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
     from cleaning import select_valid_trajectory_ids
     from preprocess_logs_to_parquet import (
         OBSERVATION_SCHEMA,
@@ -42,6 +49,10 @@ except ImportError:
     )
     from splitting import user_split
     from utils import compute_bearing
+    from modeling.plausible_labels import (
+        DEFAULT_LABEL_PATH,
+        resolve_plausible_trajectories_from_processed,
+    )
 
 
 PROFILE_NAMES = ("back_and_forth", "abnormal_speed", "initial_fix_jump")
@@ -88,6 +99,7 @@ def load_clean_source_trajectories(
     count,
     rng,
     max_inactivity_seconds=DEFAULT_MAX_INACTIVITY_SECONDS,
+    plausible_labels_path=DEFAULT_LABEL_PATH,
 ):
     source_dir = Path(processed_root) / source_dataset
     trajectories = pd.read_parquet(source_dir / "trajectories.parquet")
@@ -144,6 +156,22 @@ def load_clean_source_trajectories(
         .groupby("user_id", sort=False)
         .sample(n=1, random_state=int(rng.integers(0, 2**32 - 1)))
     )
+    if plausible_labels_path and Path(plausible_labels_path).exists():
+        reviewed = resolve_plausible_trajectories_from_processed(
+            processed_root=processed_root,
+            label_path=plausible_labels_path,
+        )
+        reviewed_ids = set(
+            reviewed.loc[
+                reviewed["dataset"].astype(str).eq(str(source_dataset)),
+                "trajectory_id",
+            ].astype(int)
+        )
+        reviewed_candidates = candidates.loc[
+            candidates["trajectory_id"].isin(reviewed_ids)
+        ]
+        if len(reviewed_candidates) >= count:
+            candidates = reviewed_candidates
     if len(candidates) < count:
         raise ValueError(
             f"{source_dataset}: requested {count} source trajectories but only "
@@ -515,6 +543,18 @@ def build_synthetic_trajectory(
         metadata_row,
         max_inactivity_seconds,
     )
+    invalid_reasons = sorted(
+        {
+            row["plausibility_reason"] or "deterministic plausibility policy"
+            for row in transition_rows
+            if row["transition_plausibility"] != 1
+        }
+    )
+    if invalid_reasons:
+        raise ValueError(
+            "generated trajectory violates deterministic plausibility rules: "
+            + "; ".join(invalid_reasons)
+        )
     mapping_rows = [
         {
             "dataset": "synthetic",
@@ -544,6 +584,7 @@ def generate_synthetic_dataset(
     seed=42,
     profiles=PROFILE_NAMES,
     max_inactivity_seconds=DEFAULT_MAX_INACTIVITY_SECONDS,
+    plausible_labels_path=DEFAULT_LABEL_PATH,
 ):
     rng = np.random.default_rng(seed)
     source_tables = {}
@@ -556,6 +597,7 @@ def generate_synthetic_dataset(
                 count=trajectories_per_profile,
                 rng=rng,
                 max_inactivity_seconds=max_inactivity_seconds,
+                plausible_labels_path=plausible_labels_path,
             )
         )
         source_tables[source_dataset] = {
@@ -600,24 +642,30 @@ def generate_synthetic_dataset(
                 source_observation_frame = tables["observations"].loc[
                     source_observation_ids
                 ].reset_index(drop=True)
-                trajectory_seed = seed + next_trajectory_id + 1
-                try:
-                    generated = build_synthetic_trajectory(
-                        source_dataset=source_dataset,
-                        source_trajectory_id=source.trajectory_id,
-                        source_transitions=source_transition_frame,
-                        source_observations=source_observation_frame,
-                        profile=profile,
-                        trajectory_id=next_trajectory_id,
-                        first_transition_id=next_transition_id,
-                        seed=trajectory_seed,
-                        max_inactivity_seconds=max_inactivity_seconds,
-                    )
-                except ValueError as exc:
+                last_error = None
+                generated = None
+                for attempt in range(50):
+                    trajectory_seed = seed + ((next_trajectory_id + 1) * 1000) + attempt
+                    try:
+                        generated = build_synthetic_trajectory(
+                            source_dataset=source_dataset,
+                            source_trajectory_id=source.trajectory_id,
+                            source_transitions=source_transition_frame,
+                            source_observations=source_observation_frame,
+                            profile=profile,
+                            trajectory_id=next_trajectory_id,
+                            first_transition_id=next_transition_id,
+                            seed=trajectory_seed,
+                            max_inactivity_seconds=max_inactivity_seconds,
+                        )
+                        break
+                    except ValueError as exc:
+                        last_error = exc
+                if generated is None:
                     raise ValueError(
                         f"Failed to generate {profile} from {source_dataset} "
-                        f"trajectory {source.trajectory_id}: {exc}"
-                    ) from exc
+                        f"trajectory {source.trajectory_id}: {last_error}"
+                    ) from last_error
                 (
                     observation_rows,
                     transition_rows,
@@ -657,6 +705,8 @@ def generate_synthetic_dataset(
         "seed": seed,
         "profiles": list(profiles),
         "max_inactivity_seconds": max_inactivity_seconds,
+        "plausible_labels": str(plausible_labels_path) if plausible_labels_path else None,
+        "deterministic_plausibility_required": True,
         "output": {
             "observations": len(all_observations),
             "transitions": len(all_transitions),
@@ -698,6 +748,7 @@ def main():
         default=DEFAULT_MAX_INACTIVITY_SECONDS / 3600,
     )
     parser.add_argument("--profiles", nargs="+", choices=PROFILE_NAMES, default=list(PROFILE_NAMES))
+    parser.add_argument("--plausible-labels", default=str(DEFAULT_LABEL_PATH))
     args = parser.parse_args()
 
     config = generate_synthetic_dataset(
@@ -713,6 +764,7 @@ def main():
             if args.max_inactivity_hours > 0
             else None
         ),
+        plausible_labels_path=args.plausible_labels,
     )
     print(json.dumps(config, indent=2))
 

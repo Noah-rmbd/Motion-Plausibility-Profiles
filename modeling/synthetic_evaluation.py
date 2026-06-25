@@ -192,6 +192,7 @@ def evaluate_synthetic_predictions(
     anomaly_percentages=None,
     aggregation=None,
     transition_score_mode=None,
+    included_features=None,
     _write_output=True,
     ignore_first_transition=None,
 ):
@@ -210,6 +211,7 @@ def evaluate_synthetic_predictions(
                         anomaly_percentages=anomaly_percentages,
                         aggregation=name,
                         transition_score_mode=score_mode,
+                        included_features=included_features,
                         _write_output=False,
                         ignore_first_transition=first_key == "excluded",
                     )
@@ -255,6 +257,7 @@ def evaluate_synthetic_predictions(
         aggregation=aggregation,
         ignore_first_transition=ignore_first_transition,
         transition_score_mode=transition_score_mode,
+        included_features=included_features,
     ).rename(columns={"selected_score": "score"})
     synthetic_trajectories = pd.read_parquet(
         Path(feature_root) / feature_set / "synthetic" / "trajectories.parquet",
@@ -294,6 +297,7 @@ def evaluate_synthetic_predictions(
             aggregation=aggregation,
             ignore_first_transition=ignore_first_transition,
             transition_score_mode=transition_score_mode,
+            included_features=included_features,
         ).rename(columns={"selected_score": "score"})
         all_dataset_scores[dataset] = dataset_scores
         reference_frames.append(
@@ -400,6 +404,7 @@ def evaluate_synthetic_predictions(
         "model_id": model_id,
         "aggregation": aggregation,
         "transition_score_mode": transition_score_mode,
+        "transition_score_features": list(included_features or []),
         "first_transition": (
             "excluded" if ignore_first_transition else "included"
         ),

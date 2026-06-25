@@ -277,6 +277,7 @@ def build_model_population_stats(
     aggregation,
     transition_score_mode,
     include_first_transition,
+    included_features=None,
     prediction_root="artifacts/predictions",
     feature_root="data/features",
     processed_root="data/processed_parquet",
@@ -305,6 +306,7 @@ def build_model_population_stats(
     transition_scores["selected_score"] = transition_error_scores(
         transition_scores,
         mode=transition_score_mode,
+        included_features=included_features,
     )
     scores = select_trajectory_scores(
         pd.read_parquet(
@@ -317,6 +319,7 @@ def build_model_population_stats(
         aggregation=aggregation,
         ignore_first_transition=not include_first_transition,
         transition_score_mode=transition_score_mode,
+        included_features=included_features,
     )
     trajectories = pd.read_parquet(
         Path(feature_root) / feature_set / dataset / "trajectories.parquet",
@@ -394,6 +397,7 @@ def build_model_population_stats(
             "threshold_level": "transition",
             "aggregation": aggregation,
             "transition_score_mode": transition_score_mode,
+            "transition_score_features": included_features,
             "include_first_transition": bool(include_first_transition),
             "n_trajectories": int(
                 selected_transitions["trajectory_id"].nunique()
@@ -461,6 +465,7 @@ def build_model_population_stats(
         "threshold_level": "trajectory",
         "aggregation": aggregation,
         "transition_score_mode": transition_score_mode,
+        "transition_score_features": included_features,
         "include_first_transition": bool(include_first_transition),
         "n_trajectories": int(len(selected_ids)),
         "n_transitions": int(

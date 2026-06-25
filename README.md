@@ -59,8 +59,6 @@ The script requires additional CSV data files (named as specified in the ```fami
 
 For the default configuration, please go to [the iNaturalist export page (may require an iNaturalist login)](https://www.inaturalist.org/observations/export) and download the data files for the taxa ```droseraceae```, ```nepenthaceae```, ```sarraceniaceae```, ```roridulaceae```, ```byblidaceae```, ```lentibulariaceae```, ```cephalotaceae```, and ```drosophyllaceae```. To do so, for each taxon, enter the taxon name into the ```taxon``` field on the form, select the suggested family in the pop-up that appears, select ```All``` for ```Geo``` and for ```Taxon``` under Point 3  (```Choose columns```), and then click the ```Create export``` button at the bottom of the page. Each export can take a while to generate based on the size of the family (e.g., families ```droseraceae```, ```nepenthaceae```, ```sarraceniaceae```, and ```lentibulariaceae``` are large and can take several hours each) and you can see the status at the bottom of the export page if you reload it (ask iNaturalist to send you an e-mail with the data once the export is complete). Also note that you can only create one export at a time. Once downloaded, unzip the data and rename the exported ```observations-123456.csv``` (or similar) files from iNaturalist to ```family.csv``` for easier association and to match the name in the script (e.g., ```droseraceae.csv```). Note that only with data files present for all families mentioned above the produced results will be appropriate and similar to those in the paper.
 
-For running the web visualization, please run the initial python script _inaturalist.py so that the returned frequent-poster.log file will be used as a data source.
-
 ## Configuration
 To configure the script, adjust the flags ```create*``` at the top of the script as needed (but the script runs with the default configuration out of the box). 
 
@@ -69,6 +67,34 @@ To configure the script, adjust the flags ```create*``` at the top of the script
 python3 _inaturalist.py
 ```
 Note that it is normal to see many lines along the lines of ```No genus name for id: XXXXXXXXX ; scientific name: Abcdefghijk```, this is due to some observations in the data having been entered with only the family name, not the full scientific name. These entries have to be treated differently for the visualization (as explained in the paper).
+
+## Files produced
+The script produces the visual representations of Fig. 17, 20, 34–36, and 68–72 of the paper (but adjusted to the newly downloaded data). The Motion Plausibility Profiles are separated into the main representation (```*.pdf```) and the respective histogram (```*-histogram.pdf```), i.e., in two separate files. Also, the script produces two versions of the main representation, one more squarish one (```*.pdf```) and one with a more landscape format (```*-wide.pdf```).
+
+
+# Interactive visualisation and automated trajectory plausibility analysis
+
+## General
+The automated trajectory plausibility analysis and interactive visualisation tool are an addition to the MPP article and project. This demo will accompagny a future article.
+
+## Requirements
+
+### Software requirements
+
+### Data requirements
+First, run the initial python script _inaturalist.py, the returned frequent-poster.log file will be used as a source for this second project.
+Move the frequent-poster.log file to data/processed/iNaturalist
+
+Then, download a second dataset of Gowalla Checkings at the following address: https://www.kaggle.com/datasets/bqlearner/gowalla-checkins/code
+Move the Gowalla_totalChecking.txt file to data/raw/diverse_datasets/
+
+## Additions related to my fork
+
+Run the complete canonical pipeline:
+
+```bash
+python pipeline.py
+```
 
 ## Running the interactive visualisation
 Once you ran the script (which can take some time depending on the size of your dataset), you can open the interactive visualisation of the dataset.
@@ -93,6 +119,55 @@ Run the complete canonical pipeline:
 
 ```bash
 python pipeline.py
+```
+
+Run a named experiment from model training through the visualization database:
+
+```bash
+python pipeline.py --from-stage models --to-stage database \
+  --experiment-config modeling/configs/five_architecture_comparison.json \
+  --run-id 5arch_$(date +%Y%m%d_%H%M)
+```
+
+Train and index only selected models from that experiment:
+
+```bash
+python pipeline.py --from-stage models --to-stage database \
+  --experiment-config modeling/configs/five_architecture_comparison.json \
+  --run-id 5arch_$(date +%Y%m%d_%H%M) \
+  --models v5arch_lstm_ae_combined_e15 v5arch_t_lstm_combined_e15
+```
+
+Train and index the Frechet-kernel transition-vector model:
+
+```bash
+python pipeline.py --from-stage models --to-stage database \
+  --experiment-config modeling/configs/frechet_kernel_experiments.json \
+  --run-id frk_$(date +%Y%m%d_%H%M)
+```
+
+Keep earlier model runs visible while adding the Frechet run:
+
+```bash
+python pipeline.py --from-stage models --to-stage database \
+  --experiment-config modeling/configs/frechet_kernel_experiments.json \
+  --run-id frk_$(date +%Y%m%d_%H%M) \
+  --extra-artifact-source artifacts/models_5arch_20260622_1412=artifacts/predictions_5arch_20260622_1412
+```
+
+The visualization model panel lets you choose which feature-error columns are
+included in non-native transition reconstruction scores. Frechet-kernel models
+use their native trajectory dissimilarity score, with transition-level nearest
+landmark errors shown as explanations.
+
+Start the visualization against the same run:
+
+```bash
+python pipeline.py --from-stage database --to-stage database \
+  --experiment-config modeling/configs/five_architecture_comparison.json \
+  --model-root artifacts/models_5arch_YYYYMMDD_HHMM \
+  --prediction-root artifacts/predictions_5arch_YYYYMMDD_HHMM \
+  --serve
 ```
 
 Resume from model training after preprocessing and feature generation:
@@ -140,6 +215,3 @@ python pipeline.py --to-stage features
 ```
 
 The expensive model stage can be omitted with `--skip models`.
-
-## Files produced
-The script produces the visual representations of Fig. 17, 20, 34–36, and 68–72 of the paper (but adjusted to the newly downloaded data). The Motion Plausibility Profiles are separated into the main representation (```*.pdf```) and the respective histogram (```*-histogram.pdf```), i.e., in two separate files. Also, the script produces two versions of the main representation, one more squarish one (```*.pdf```) and one with a more landscape format (```*-wide.pdf```).

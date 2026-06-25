@@ -1,13 +1,20 @@
 import argparse
+import csv
 import json
 import mimetypes
 import sqlite3
 import urllib.parse
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
+from modeling.plausible_labels import (
+    EXTENDED_COLUMNS,
+    resolve_plausible_trajectories,
+)
 from modeling.score_aggregation import (
     AGGREGATION_COLUMNS,
     DEFAULT_WINDOW_SIZE,
@@ -18,6 +25,7 @@ from modeling.score_aggregation import (
     transition_error_scores,
 )
 from modeling.model_diagnostics import build_model_population_stats
+from modeling.synthetic_evaluation import evaluate_synthetic_predictions
 
 
 ROOT = Path(__file__).resolve().parent
@@ -26,6 +34,8 @@ DB_PATH = ROOT / "artifacts/app/plausibility.db"
 PREDICTION_ROOT = ROOT / "artifacts/predictions"
 PROCESSED_ROOT = ROOT / "data/processed_parquet"
 STATS_ROOT = ROOT / "artifacts/stats/processed_parquet"
+PLAUSIBLE_LABELS_PATH = ROOT / "data/labels/plausible_trajectories.csv"
+CUSTOM_METRICS_CACHE = {}
 
 STATS_METRICS = {
     "speed": "transition_metrics",
@@ -49,8 +59,41 @@ def json_value(value):
     return json.loads(value)
 
 
+def query_bool(query, name, default=False):
+    raw = query.get(name, [None])[0]
+    if raw is None:
+        return default
+    return str(raw).lower() in {"1", "true", "yes", "on"}
+
+
+def query_list(query, name):
+    values = query.get(name, [])
+    if not values:
+        return None
+    result = []
+    for value in values:
+        result.extend(
+            item.strip()
+            for item in str(value).split(",")
+            if item.strip()
+        )
+    return result or None
+
+
+def model_prediction_root(model_id):
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT prediction_root FROM models WHERE model_id = ?",
+            (model_id,),
+        ).fetchone()
+    if row is None:
+        return PREDICTION_ROOT
+    return Path(row["prediction_root"])
+
+
 def synthetic_metrics(model_id):
-    path = PREDICTION_ROOT / model_id / "synthetic" / "metrics.json"
+    prediction_root = model_prediction_root(model_id)
+    path = prediction_root / model_id / "synthetic" / "metrics.json"
     if not path.exists():
         return None
     synthetic_features = (
@@ -78,6 +121,7 @@ def model_record(row, datasets):
         "training": json_value(row["training_json"]),
         "evaluation": json_value(row["evaluation_json"]),
         "experiment": json_value(row["experiment_json"]),
+        "prediction_root": row["prediction_root"],
         "final_loss": row["final_loss"],
         "synthetic_metrics": None,
         "datasets": datasets,
@@ -87,7 +131,7 @@ def model_record(row, datasets):
 def read_scores(model_id, dataset, table, trajectory_ids):
     if not trajectory_ids:
         return pd.DataFrame()
-    path = PREDICTION_ROOT / model_id / dataset / f"{table}.parquet"
+    path = model_prediction_root(model_id) / model_id / dataset / f"{table}.parquet"
     if not path.exists():
         return pd.DataFrame()
     return pd.read_parquet(
@@ -167,6 +211,196 @@ def canonical_payload(dataset, trajectory_ids, model_id=None):
     }
 
 
+def start_date_for_trajectory(row):
+    timestamp = row.get("start_timestamp")
+    if timestamp:
+        return str(timestamp)[:10].replace("-", "/")
+    return "*"
+
+
+def read_label_rows(path):
+    path = Path(path)
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return [
+            {column: row.get(column, "") for column in EXTENDED_COLUMNS}
+            for row in reader
+        ]
+
+
+def write_label_rows(path, rows):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            row.get("dataset", ""),
+            row.get("user_id", ""),
+            row.get("start_date", ""),
+            row.get("trajectory_id", ""),
+        ),
+    )
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=EXTENDED_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def validate_plausible_trajectory(dataset, trajectory_id):
+    if dataset == "synthetic":
+        return False, "Synthetic trajectories cannot be reviewed as plausible."
+    with connection() as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM trajectories
+            WHERE dataset = ? AND trajectory_id = ?
+            """,
+            (dataset, trajectory_id),
+        ).fetchone()
+    if row is None:
+        return False, f"Unknown trajectory: {dataset}/{trajectory_id}"
+    row = dict(row)
+    if int(row["n_transitions"]) <= 0:
+        return False, "Trajectory has no transition."
+
+    base = PROCESSED_ROOT / dataset
+    mapping = pd.read_parquet(
+        base / "trajectory_transitions.parquet",
+        filters=[("trajectory_id", "=", int(trajectory_id))],
+    )
+    if mapping.empty:
+        return False, "Trajectory has no transition mapping."
+    transitions = pd.read_parquet(
+        base / "transitions.parquet",
+        columns=["transition_id", "transition_plausibility", "plausibility_reason"],
+        filters=[("transition_id", "in", mapping["transition_id"].tolist())],
+    )
+    invalid = transitions.loc[transitions["transition_plausibility"] != 1]
+    if not invalid.empty:
+        reasons = sorted(
+            {
+                value or "deterministic plausibility policy"
+                for value in invalid["plausibility_reason"].dropna().astype(str)
+            }
+        )
+        return False, "Deterministic-rule violation: " + "; ".join(reasons)
+    return True, row
+
+
+def append_plausible_labels(dataset, user_id, trajectory_ids, notes=""):
+    existing_rows = read_label_rows(PLAUSIBLE_LABELS_PATH)
+    existing_keys = {
+        (row.get("dataset", ""), str(row.get("trajectory_id", "")))
+        for row in existing_rows
+        if row.get("trajectory_id")
+    }
+    timestamp = datetime.now(timezone.utc).isoformat()
+    added = []
+    existing = []
+    rejected = []
+    for raw_id in trajectory_ids:
+        trajectory_id = int(raw_id)
+        valid, result = validate_plausible_trajectory(dataset, trajectory_id)
+        if not valid:
+            rejected.append(
+                {
+                    "trajectory_id": trajectory_id,
+                    "reason": result,
+                }
+            )
+            continue
+        row = result
+        if str(row["user_id"]) != str(user_id):
+            rejected.append(
+                {
+                    "trajectory_id": trajectory_id,
+                    "reason": "Trajectory does not belong to the selected user.",
+                }
+            )
+            continue
+        key = (dataset, str(trajectory_id))
+        if key in existing_keys:
+            existing.append(trajectory_id)
+            continue
+        label_row = {
+            "dataset": dataset,
+            "user_id": str(user_id),
+            "start_date": start_date_for_trajectory(row),
+            "trajectory_id": str(trajectory_id),
+            "source": "interactive_visualization",
+            "created_at": timestamp,
+            "notes": notes,
+        }
+        existing_rows.append(label_row)
+        existing_keys.add(key)
+        added.append(label_row)
+    if added:
+        write_label_rows(PLAUSIBLE_LABELS_PATH, existing_rows)
+    try:
+        label_path = str(PLAUSIBLE_LABELS_PATH.relative_to(ROOT))
+    except ValueError:
+        label_path = str(PLAUSIBLE_LABELS_PATH)
+    return {
+        "label_path": label_path,
+        "added": added,
+        "existing": existing,
+        "rejected": rejected,
+    }
+
+
+def plausible_label_metadata_by_trajectory(dataset, user_id, trajectory_rows):
+    rows = read_label_rows(PLAUSIBLE_LABELS_PATH)
+    if not rows or dataset == "synthetic":
+        return {}
+    trajectories = {}
+    for row in trajectory_rows:
+        trajectory_id = int(row["trajectory_id"])
+        trajectories[trajectory_id] = {
+            "trajectory_id": trajectory_id,
+            "user_id": str(row["user_id"]),
+            "start_date": start_date_for_trajectory(row),
+            "labels": [],
+        }
+    for label in rows:
+        if label.get("dataset") != dataset:
+            continue
+        label_user = str(label.get("user_id", ""))
+        if label_user not in {"", "*", str(user_id)}:
+            continue
+        label_trajectory_id = str(label.get("trajectory_id", "")).strip()
+        label_start_date = str(label.get("start_date", "")).strip()
+        for trajectory_id, trajectory in trajectories.items():
+            if label_trajectory_id:
+                if str(trajectory_id) != label_trajectory_id:
+                    continue
+            elif label_start_date and label_start_date != "*":
+                if trajectory["start_date"] != label_start_date.replace("-", "/"):
+                    continue
+            trajectory["labels"].append(label)
+    return {
+        trajectory_id: {
+            "is_plausible_label": True,
+            "plausible_label_count": len(item["labels"]),
+            "plausible_label_sources": sorted(
+                {
+                    label.get("source") or "manual"
+                    for label in item["labels"]
+                }
+            ),
+            "plausible_label_notes": [
+                label.get("notes", "")
+                for label in item["labels"]
+                if label.get("notes")
+            ],
+        }
+        for trajectory_id, item in trajectories.items()
+        if item["labels"]
+    }
+
+
 class VisualizationHandler(BaseHTTPRequestHandler):
     def send_json(self, payload, status=200):
         body = json.dumps(
@@ -209,11 +443,17 @@ class VisualizationHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in {"/api/scores", "/api/model_stats"}:
+        if parsed.path not in {
+            "/api/scores",
+            "/api/model_stats",
+            "/api/plausible_trajectories",
+        }:
             return self.send_json({"error": "not found"}, 404)
         try:
             length = int(self.headers.get("Content-Length", 0))
             request = json.loads(self.rfile.read(length) or b"{}")
+            if parsed.path == "/api/plausible_trajectories":
+                return self.plausible_trajectories(request)
             if parsed.path == "/api/model_stats":
                 return self.model_stats(request)
             return self.scores(request)
@@ -262,13 +502,69 @@ class VisualizationHandler(BaseHTTPRequestHandler):
         if not model_id:
             raise ValueError("model_id is required")
         with connection() as conn:
-            exists = conn.execute(
-                "SELECT 1 FROM models WHERE model_id = ?",
+            model_row = conn.execute(
+                """
+                SELECT feature_set, features_json, evaluation_json
+                FROM models WHERE model_id = ?
+                """,
                 (model_id,),
             ).fetchone()
-        if exists is None:
+        if model_row is None:
             raise ValueError(f"Unknown model: {model_id}")
-        self.send_json(synthetic_metrics(model_id))
+        included_features = query_list(query, "transition_score_features")
+        aggregation = query.get("aggregation", [""])[0]
+        transition_score_mode = query.get("transition_score_mode", [""])[0]
+        include_first_transition = query_bool(
+            query,
+            "include_first_transition",
+            default=True,
+        )
+        if not included_features and not aggregation and not transition_score_mode:
+            self.send_json(synthetic_metrics(model_id))
+            return
+        if not aggregation:
+            aggregation = "mean"
+        if not transition_score_mode:
+            transition_score_mode = "mean"
+        model_features = json_value(model_row["features_json"])
+        if included_features and set(included_features) == set(model_features):
+            included_features = None
+        evaluation = json_value(model_row["evaluation_json"]) or {}
+        reference_datasets = [
+            dataset
+            for dataset in evaluation.get("datasets", ["inat", "gowalla"])
+            if dataset != "synthetic"
+        ] or ["inat", "gowalla"]
+        cache_key = json.dumps(
+            {
+                "model_id": model_id,
+                "aggregation": aggregation,
+                "transition_score_mode": transition_score_mode,
+                "included_features": included_features or [],
+                "include_first_transition": include_first_transition,
+                "reference_datasets": reference_datasets,
+            },
+            sort_keys=True,
+        )
+        if cache_key in CUSTOM_METRICS_CACHE:
+            self.send_json(CUSTOM_METRICS_CACHE[cache_key])
+            return
+        metrics = evaluate_synthetic_predictions(
+            model_id=model_id,
+            prediction_root=model_prediction_root(model_id),
+            feature_root=ROOT / "data/features",
+            processed_root=PROCESSED_ROOT,
+            feature_set=model_row["feature_set"],
+            reference_datasets=reference_datasets,
+            plausible_labels_path=PLAUSIBLE_LABELS_PATH,
+            aggregation=aggregation,
+            transition_score_mode=transition_score_mode,
+            included_features=included_features,
+            ignore_first_transition=not include_first_transition,
+            _write_output=False,
+        )
+        CUSTOM_METRICS_CACHE[cache_key] = metrics
+        self.send_json(metrics)
 
     def users(self, query):
         dataset = query.get("dataset", [""])[0]
@@ -281,7 +577,7 @@ class VisualizationHandler(BaseHTTPRequestHandler):
         if search:
             sql += " AND user_id LIKE ?"
             params.append(f"%{search}%")
-        sql += " ORDER BY observation_count DESC LIMIT ?"
+        sql += " ORDER BY trajectory_count DESC LIMIT ?"
         params.append(limit)
         with connection() as conn:
             rows = [dict(row) for row in conn.execute(sql, params)]
@@ -291,6 +587,7 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                     **row,
                     "username": row["user_id"],
                     "nb_observations": row["observation_count"],
+                    "nb_trajectories": row["trajectory_count"],
                 }
                 for row in rows
             ]
@@ -307,13 +604,18 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                 for row in conn.execute(
                     """
                     SELECT * FROM trajectories
-                    WHERE dataset = ? AND user_id = ?
+                    WHERE dataset = ? AND user_id = ? AND n_transitions > 0
                     ORDER BY start_timestamp, trajectory_id
                     """,
                     (dataset, user_id),
                 )
             ]
         trajectory_ids = [row["trajectory_id"] for row in trajectory_rows]
+        plausible_labels = plausible_label_metadata_by_trajectory(
+            dataset,
+            user_id,
+            trajectory_rows,
+        )
         payload = canonical_payload(dataset, trajectory_ids)
         base = PROCESSED_ROOT / dataset
         all_observations = pd.read_parquet(
@@ -343,6 +645,8 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                     "baseline_unplausible": baseline_unplausible,
                     "model_unplausible": False,
                     "is_unplausible": baseline_unplausible,
+                    "reviewed_plausible": row["trajectory_id"] in plausible_labels,
+                    "plausible_label": plausible_labels.get(row["trajectory_id"]),
                 }
             )
         mapping = {}
@@ -359,6 +663,8 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                 ),
                 "model_unplausible": False,
                 "is_unplausible": row["trajectory_id"] in baseline_reasons,
+                "reviewed_plausible": row["trajectory_id"] in plausible_labels,
+                "plausible_label": plausible_labels.get(row["trajectory_id"]),
             }
             for row in trajectory_rows
         ]
@@ -395,7 +701,7 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                     """
                     SELECT trajectory_id, n_transitions, start_timestamp, end_timestamp
                     FROM trajectories
-                    WHERE dataset = ? AND user_id = ?
+                    WHERE dataset = ? AND user_id = ? AND n_transitions > 0
                     ORDER BY start_timestamp, trajectory_id
                     """,
                     (dataset, user_id),
@@ -423,6 +729,20 @@ class VisualizationHandler(BaseHTTPRequestHandler):
         if not dataset or not trajectory_ids:
             raise ValueError("dataset and trajectory_ids are required")
         self.send_json(canonical_payload(dataset, trajectory_ids, model_id))
+
+    def plausible_trajectories(self, request):
+        dataset = request.get("dataset", "")
+        user_id = request.get("user_id", "")
+        trajectory_ids = request.get("trajectory_ids", [])
+        if not dataset or not user_id or not trajectory_ids:
+            raise ValueError("dataset, user_id, and trajectory_ids are required")
+        payload = append_plausible_labels(
+            dataset=dataset,
+            user_id=user_id,
+            trajectory_ids=trajectory_ids,
+            notes=request.get("notes", ""),
+        )
+        self.send_json(payload)
 
     def stats(self, query):
         dataset = query.get("dataset", ["inat"])[0]
@@ -471,6 +791,7 @@ class VisualizationHandler(BaseHTTPRequestHandler):
             ).fetchone()
         if row is None:
             raise ValueError(f"Unknown model: {model_id}")
+        prediction_root = model_prediction_root(model_id)
         payload = build_model_population_stats(
             model_id=model_id,
             dataset=request["dataset"],
@@ -482,10 +803,11 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                 "transition_score_mode",
                 "mean",
             ),
+            included_features=request.get("transition_score_features"),
             include_first_transition=bool(
                 request.get("include_first_transition", True)
             ),
-            prediction_root=PREDICTION_ROOT,
+            prediction_root=prediction_root,
             feature_root=ROOT / "data/features",
             processed_root=PROCESSED_ROOT,
             feature_set=row["feature_set"],
@@ -499,6 +821,7 @@ class VisualizationHandler(BaseHTTPRequestHandler):
         percentage = float(request.get("anomaly_percentage", 5.0))
         aggregation = request.get("aggregation", "mean")
         transition_score_mode = request.get("transition_score_mode", "mean")
+        included_features = request.get("transition_score_features")
         include_first_transition = bool(
             request.get("include_first_transition", True)
         )
@@ -518,6 +841,7 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                 (model_id,),
             ).fetchone()
         evaluation = json_value(model_row["evaluation_json"]) if model_row else {}
+        prediction_root = model_prediction_root(model_id)
         trajectory_scores = read_scores(
             model_id, dataset, "trajectory_scores", trajectory_ids
         )
@@ -530,11 +854,13 @@ class VisualizationHandler(BaseHTTPRequestHandler):
             aggregation=aggregation,
             ignore_first_transition=not include_first_transition,
             transition_score_mode=transition_score_mode,
+            included_features=included_features,
         )
         transition_scores = transition_scores.copy()
         transition_scores["selected_score"] = transition_error_scores(
             transition_scores,
             mode=transition_score_mode,
+            included_features=included_features,
         )
         trajectory_scores = trajectory_scores.merge(
             selected_trajectory_scores,
@@ -544,7 +870,8 @@ class VisualizationHandler(BaseHTTPRequestHandler):
             suffixes=("", "_selected"),
         )
         threshold_reference = dataset
-        if dataset == "synthetic" and model_row:
+        custom_feature_subset = included_features is not None
+        if dataset == "synthetic" and model_row and not custom_feature_subset:
             model_metrics = synthetic_metrics(model_id) or {}
             if model_metrics.get("metrics_schema_version") != 3:
                 raise ValueError(
@@ -571,6 +898,66 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                 threshold_reference = "unlabeled held-out real score distribution"
             else:
                 threshold = float("inf")
+        elif custom_feature_subset and dataset == "synthetic":
+            threshold = float("inf")
+            threshold_reference = (
+                "custom feature subsets require real-dataset calibration"
+            )
+        elif custom_feature_subset:
+            with connection() as conn:
+                feature_set_row = conn.execute(
+                    "SELECT feature_set FROM models WHERE model_id = ?",
+                    (model_id,),
+                ).fetchone()
+            if feature_set_row is None:
+                raise ValueError(f"Unknown model: {model_id}")
+            calibration_path = (
+                ROOT
+                / "data/features"
+                / feature_set_row["feature_set"]
+                / dataset
+                / "trajectories.parquet"
+            )
+            calibration_frame = pd.read_parquet(
+                calibration_path,
+                columns=["trajectory_id", "use_for_calibration"],
+            )
+            calibration_ids = set(
+                calibration_frame.loc[
+                    calibration_frame["use_for_calibration"],
+                    "trajectory_id",
+                ].astype(int)
+            )
+            all_transition_scores = pd.read_parquet(
+                prediction_root
+                / model_id
+                / dataset
+                / "transition_scores.parquet"
+            )
+            calibration_scores = select_trajectory_scores(
+                pd.read_parquet(
+                    prediction_root
+                    / model_id
+                    / dataset
+                    / "trajectory_scores.parquet"
+                ),
+                all_transition_scores,
+                aggregation=aggregation,
+                ignore_first_transition=not include_first_transition,
+                transition_score_mode=transition_score_mode,
+                included_features=included_features,
+            )
+            calibration_scores = calibration_scores.loc[
+                calibration_scores["trajectory_id"].isin(calibration_ids)
+            ]
+            if calibration_scores.empty:
+                raise ValueError("Calibration score population is empty")
+            threshold = float(
+                calibration_scores["selected_score"].quantile(
+                    1.0 - percentage / 100.0
+                )
+            )
+            threshold_reference = "held-out real score distribution"
         else:
             with connection() as conn:
                 row = conn.execute(
@@ -636,8 +1023,18 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                     ]
                 )
         transition_result = {}
+        selected_feature_keys = (
+            {f"error_{feature}" for feature in included_features}
+            if included_features is not None
+            else None
+        )
         for score in transition_scores.to_dict("records"):
-            feature_keys = [key for key in score if key.startswith("error_")]
+            feature_keys = [
+                key
+                for key in score
+                if key.startswith("error_")
+                and (selected_feature_keys is None or key in selected_feature_keys)
+            ]
             is_least_plausible = (
                 score["trajectory_id"] in anomalous_ids
                 and score["transition_id"] in ranked_steps[score["trajectory_id"]]
@@ -654,6 +1051,7 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                 "threshold": threshold,
                 "threshold_reference": threshold_reference,
                 "transition_score_mode": transition_score_mode,
+                "transition_score_features": included_features,
                 "include_first_transition": include_first_transition,
                 "trajectories": trajectory_result,
                 "transitions": transition_result,
