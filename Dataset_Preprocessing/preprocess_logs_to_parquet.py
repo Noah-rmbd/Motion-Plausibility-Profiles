@@ -73,6 +73,15 @@ TRAJECTORY_SCHEMA = pa.schema(
     ]
 )
 
+TRAJECTORY_CENTER_SCHEMA = pa.schema(
+    [   
+        ("dataset", pa.string()),
+        ("trajectory_id", pa.int64()),
+        ("lat", pa.float64()),
+        ("lon", pa.float64()),
+    ]
+)
+
 TRAJECTORY_TRANSITION_SCHEMA = pa.schema(
     [
         ("dataset", pa.string()),
@@ -198,6 +207,11 @@ def preprocess_log(
     observations = ParquetBatchWriter(output_dir / "observations.parquet", OBSERVATION_SCHEMA, batch_size)
     transitions = ParquetBatchWriter(output_dir / "transitions.parquet", TRANSITION_SCHEMA, batch_size)
     trajectories = ParquetBatchWriter(output_dir / "trajectories.parquet", TRAJECTORY_SCHEMA, batch_size)
+    trajectory_centers = ParquetBatchWriter(
+        output_dir / "trajectory_centers.parquet",
+        TRAJECTORY_CENTER_SCHEMA,
+        batch_size,
+    )
     trajectory_transitions = ParquetBatchWriter(
         output_dir / "trajectory_transitions.parquet",
         TRAJECTORY_TRANSITION_SCHEMA,
@@ -213,12 +227,31 @@ def preprocess_log(
     session_breaks = 0
 
     def finish_trajectory():
+        # Send the pending list of consecutive transitions from a single user into the trajectories and trajectory_transitions parquet tables
         nonlocal trajectory_id, pending_transitions
         if not pending_transitions:
             return
 
         first = pending_transitions[0]
         last = pending_transitions[-1]
+
+        # Calculate the barycenter of all observation points that are not obscured in the trajectory
+        coords = [(first["lat1"], first["lon1"])]
+        for t in pending_transitions:
+            coords.append((t["lat2"], t["lon2"]))
+
+        mean_lat = sum(c[0] for c in coords) / len(coords)
+        mean_lon = sum(c[1] for c in coords) / len(coords)
+
+        trajectory_centers.append(
+            {
+                "dataset": dataset,
+                "trajectory_id": trajectory_id,
+                "lat": mean_lat,
+                "lon": mean_lon,
+            }
+        )
+
         trajectories.append(
             {
                 "dataset": dataset,
@@ -230,7 +263,12 @@ def preprocess_log(
             }
         )
         for order, transition in enumerate(pending_transitions):
-            transitions.append(transition)
+            # Clean up temporary coordinates
+            clean_transition = {
+                k: v for k, v in transition.items()
+                if k not in {"lat1", "lon1", "lat2", "lon2"}
+            }
+            transitions.append(clean_transition)
             trajectory_transitions.append(
                 {
                     "dataset": dataset,
@@ -350,6 +388,10 @@ def preprocess_log(
                     "transition_id": transition_id,
                     "observation_id1": previous_point["observation_id"],
                     "observation_id2": observation_id,
+                    "lat1": previous_point["lat"],
+                    "lon1": previous_point["lon"],
+                    "lat2": lat,
+                    "lon2": lon,
                     "speed_kmh": speed_kmh,
                     "elapsed_time_s": elapsed_time_s,
                     "distance_m": distance_m,
@@ -376,6 +418,7 @@ def preprocess_log(
     observations.close()
     transitions.close()
     trajectories.close()
+    trajectory_centers.close()
     trajectory_transitions.close()
 
     return {
@@ -383,11 +426,13 @@ def preprocess_log(
         "transitions": transitions.count,
         "trajectories": trajectories.count,
         "trajectory_transitions": trajectory_transitions.count,
+        "trajectory_centers": trajectory_centers.count,
         "session_breaks": session_breaks,
     }
 
 
 def preprocess_many(datasets, output_dir, batch_size, max_inactivity_seconds):
+    # Call preprocess log function on the multiple log files of every dataset
     results = {}
     for dataset, input_path in datasets.items():
         print(f"Preprocessing {dataset}: {input_path}")

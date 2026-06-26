@@ -36,6 +36,8 @@ PROCESSED_ROOT = ROOT / "data/processed_parquet"
 STATS_ROOT = ROOT / "artifacts/stats/processed_parquet"
 PLAUSIBLE_LABELS_PATH = ROOT / "data/labels/plausible_trajectories.csv"
 CUSTOM_METRICS_CACHE = {}
+TRAJECTORY_BUBBLE_CACHE = {}
+TRAJECTORY_SCORE_FILTER_CACHE = {}
 
 STATS_METRICS = {
     "speed": "transition_metrics",
@@ -57,6 +59,13 @@ def json_value(value):
     if value is None:
         return None
     return json.loads(value)
+
+
+def finite_json_number(value):
+    if value is None:
+        return None
+    number = float(value)
+    return number if np.isfinite(number) else None
 
 
 def query_bool(query, name, default=False):
@@ -248,6 +257,319 @@ def write_label_rows(path, rows):
         writer.writerows(rows)
 
 
+def mercator_pixels(latitudes, longitudes, zoom):
+    latitudes = np.clip(np.asarray(latitudes, dtype=float), -85.05112878, 85.05112878)
+    longitudes = np.asarray(longitudes, dtype=float)
+    scale = 256 * (2 ** int(zoom))
+    lat_rad = np.radians(latitudes)
+    x = (longitudes + 180.0) / 360.0 * scale
+    y = (
+        1.0
+        - np.log(np.tan(lat_rad) + (1.0 / np.cos(lat_rad))) / np.pi
+    ) / 2.0 * scale
+    return x, y
+
+
+def derive_trajectory_centers(dataset):
+    base = PROCESSED_ROOT / dataset
+    required = [
+        base / "trajectory_transitions.parquet",
+        base / "transitions.parquet",
+        base / "observations.parquet",
+    ]
+    if not all(path.exists() for path in required):
+        raise FileNotFoundError(
+            f"No trajectory barycentre file for dataset '{dataset}', and raw "
+            "processed parquet files are not available to derive it."
+        )
+
+    mapping = pd.read_parquet(
+        base / "trajectory_transitions.parquet",
+        columns=["trajectory_id", "transition_id", "transition_order"],
+    )
+    transitions = pd.read_parquet(
+        base / "transitions.parquet",
+        columns=["transition_id", "observation_id1", "observation_id2"],
+    )
+    observations = pd.read_parquet(
+        base / "observations.parquet",
+        columns=["observation_id", "lat", "lon"],
+    ).set_index("observation_id")
+    joined = mapping.merge(transitions, on="transition_id", how="left")
+    joined = joined.sort_values(["trajectory_id", "transition_order"])
+
+    centers = []
+    for trajectory_id, group in joined.groupby("trajectory_id", sort=False):
+        observation_ids = [group.iloc[0]["observation_id1"]]
+        observation_ids.extend(group["observation_id2"].tolist())
+        coords = observations.reindex(observation_ids)[["lat", "lon"]].dropna()
+        if coords.empty:
+            continue
+        centers.append(
+            {
+                "dataset": dataset,
+                "trajectory_id": int(trajectory_id),
+                "lat": float(coords["lat"].mean()),
+                "lon": float(coords["lon"].mean()),
+            }
+        )
+    return pd.DataFrame(
+        centers,
+        columns=["dataset", "trajectory_id", "lat", "lon"],
+    )
+
+
+def load_trajectory_bubble_frame(dataset):
+    if dataset in TRAJECTORY_BUBBLE_CACHE:
+        return TRAJECTORY_BUBBLE_CACHE[dataset]
+
+    center_path = PROCESSED_ROOT / dataset / "trajectory_centers.parquet"
+    centers = pd.read_parquet(center_path) if center_path.exists() else derive_trajectory_centers(dataset)
+    centers = centers[
+        ["dataset", "trajectory_id", "lat", "lon"]
+    ].dropna(subset=["lat", "lon"])
+    centers = centers[
+        np.isfinite(centers["lat"].to_numpy())
+        & np.isfinite(centers["lon"].to_numpy())
+    ]
+
+    with connection() as conn:
+        trajectories = pd.read_sql_query(
+            """
+            SELECT dataset, trajectory_id, user_id, n_transitions,
+                   start_timestamp, end_timestamp
+            FROM trajectories
+            WHERE dataset = ? AND n_transitions > 0
+            """,
+            conn,
+            params=(dataset,),
+        )
+
+    frame = centers.merge(
+        trajectories,
+        on=["dataset", "trajectory_id"],
+        how="inner",
+        validate="one_to_one",
+    )
+    frame["date"] = frame["start_timestamp"].fillna("").str[:10].str.replace("-", "/")
+    TRAJECTORY_BUBBLE_CACHE[dataset] = frame
+    return frame
+
+
+def score_threshold_for_settings(
+    model_id,
+    dataset,
+    percentage,
+    aggregation,
+    transition_score_mode,
+    included_features,
+    include_first_transition,
+):
+    first_key = "included" if include_first_transition else "excluded"
+    prediction_root = model_prediction_root(model_id)
+    with connection() as conn:
+        model_row = conn.execute(
+            """
+            SELECT feature_set, evaluation_json
+            FROM models WHERE model_id = ?
+            """,
+            (model_id,),
+        ).fetchone()
+    if model_row is None:
+        raise ValueError(f"Unknown model: {model_id}")
+
+    threshold_reference = dataset
+    custom_feature_subset = included_features is not None
+    if dataset == "synthetic" and not custom_feature_subset:
+        model_metrics = synthetic_metrics(model_id) or {}
+        if model_metrics.get("metrics_schema_version") != 3:
+            raise ValueError(
+                f"{model_id}: synthetic metrics use an obsolete evaluation schema"
+            )
+        aggregation_metrics = (
+            model_metrics.get("scoring", {})
+            .get(transition_score_mode, {})
+            .get(first_key, {})
+            .get(aggregation)
+        )
+        if aggregation_metrics is None:
+            aggregation_metrics = model_metrics.get("aggregations", {}).get(
+                aggregation,
+                model_metrics,
+            )
+        metric_point = min(
+            aggregation_metrics.get("threshold_metrics", []),
+            key=lambda item: abs(item["anomaly_percentage"] - percentage),
+            default=None,
+        )
+        threshold = (
+            metric_point["threshold"]
+            if metric_point and "threshold" in metric_point
+            else float("inf")
+        )
+        threshold_reference = "unlabeled held-out real score distribution"
+    elif custom_feature_subset and dataset == "synthetic":
+        threshold = float("inf")
+        threshold_reference = "custom feature subsets require real-dataset calibration"
+    elif custom_feature_subset:
+        calibration_path = (
+            ROOT
+            / "data/features"
+            / model_row["feature_set"]
+            / dataset
+            / "trajectories.parquet"
+        )
+        calibration_frame = pd.read_parquet(
+            calibration_path,
+            columns=["trajectory_id", "use_for_calibration"],
+        )
+        calibration_ids = set(
+            calibration_frame.loc[
+                calibration_frame["use_for_calibration"],
+                "trajectory_id",
+            ].astype(int)
+        )
+        all_transition_scores = pd.read_parquet(
+            prediction_root / model_id / dataset / "transition_scores.parquet"
+        )
+        calibration_scores = select_trajectory_scores(
+            pd.read_parquet(
+                prediction_root / model_id / dataset / "trajectory_scores.parquet"
+            ),
+            all_transition_scores,
+            aggregation=aggregation,
+            ignore_first_transition=not include_first_transition,
+            transition_score_mode=transition_score_mode,
+            included_features=included_features,
+        )
+        calibration_scores = calibration_scores.loc[
+            calibration_scores["trajectory_id"].isin(calibration_ids)
+        ]
+        if calibration_scores.empty:
+            raise ValueError("Calibration score population is empty")
+        threshold = float(
+            calibration_scores["selected_score"].quantile(
+                1.0 - percentage / 100.0
+            )
+        )
+        threshold_reference = "held-out real score distribution"
+    else:
+        with connection() as conn:
+            row = conn.execute(
+                """
+                SELECT threshold_curve_json FROM model_datasets
+                WHERE model_id = ? AND dataset = ?
+                """,
+                (model_id, dataset),
+            ).fetchone()
+        curves = json_value(row["threshold_curve_json"]) if row else {}
+        curve = (
+            curves.get(transition_score_mode, {})
+            .get(first_key, {})
+            .get(aggregation, [])
+            if isinstance(curves, dict)
+            else curves
+        )
+        if not curve and isinstance(curves, dict):
+            curve = curves.get(aggregation, [])
+        threshold = min(
+            curve,
+            key=lambda item: abs(item["percentage"] - percentage),
+            default={"threshold": float("inf")},
+        )["threshold"]
+    return float(threshold), threshold_reference
+
+
+def model_score_filter_frame(
+    model_id,
+    dataset,
+    percentage,
+    aggregation,
+    transition_score_mode,
+    included_features,
+    include_first_transition,
+):
+    if aggregation not in AGGREGATION_COLUMNS:
+        raise ValueError(f"Unknown trajectory aggregation: {aggregation}")
+    if transition_score_mode not in TRANSITION_SCORE_MODES:
+        raise ValueError(f"Unknown transition score mode: {transition_score_mode}")
+    cache_key = json.dumps(
+        {
+            "model_id": model_id,
+            "dataset": dataset,
+            "percentage": percentage,
+            "aggregation": aggregation,
+            "transition_score_mode": transition_score_mode,
+            "included_features": included_features or [],
+            "include_first_transition": include_first_transition,
+        },
+        sort_keys=True,
+    )
+    if cache_key in TRAJECTORY_SCORE_FILTER_CACHE:
+        return TRAJECTORY_SCORE_FILTER_CACHE[cache_key]
+
+    prediction_root = model_prediction_root(model_id)
+    model_dir = prediction_root / model_id / dataset
+    trajectory_path = model_dir / "trajectory_scores.parquet"
+    transition_path = model_dir / "transition_scores.parquet"
+    if not trajectory_path.exists() or not transition_path.exists():
+        raise FileNotFoundError(
+            f"No predictions found for model '{model_id}' on dataset '{dataset}'."
+        )
+    trajectory_scores = pd.read_parquet(trajectory_path)
+    transition_scores = pd.read_parquet(transition_path)
+    selected_scores = select_trajectory_scores(
+        trajectory_scores,
+        transition_scores,
+        aggregation=aggregation,
+        ignore_first_transition=not include_first_transition,
+        transition_score_mode=transition_score_mode,
+        included_features=included_features,
+    )
+    threshold, threshold_reference = score_threshold_for_settings(
+        model_id=model_id,
+        dataset=dataset,
+        percentage=percentage,
+        aggregation=aggregation,
+        transition_score_mode=transition_score_mode,
+        included_features=included_features,
+        include_first_transition=include_first_transition,
+    )
+    selected_scores = selected_scores.copy()
+    selected_scores["selected_score"] = selected_scores["selected_score"].astype(float)
+    selected_scores["model_unplausible"] = selected_scores["selected_score"] >= threshold
+    payload = {
+        "scores": selected_scores[
+            ["trajectory_id", "selected_score", "model_unplausible"]
+        ],
+        "threshold": threshold,
+        "threshold_reference": threshold_reference,
+    }
+    TRAJECTORY_SCORE_FILTER_CACHE[cache_key] = payload
+    return payload
+
+
+def parse_parent_bubbles(raw_parent):
+    if not raw_parent:
+        return []
+    parents = []
+    for item in raw_parent.split(";"):
+        if not item:
+            continue
+        parts = item.split(":")
+        if len(parts) != 4:
+            raise ValueError("Invalid trajectory bubble parent descriptor")
+        parents.append(
+            {
+                "zoom": int(parts[0]),
+                "cell_size": int(parts[1]),
+                "grid_x": int(parts[2]),
+                "grid_y": int(parts[3]),
+            }
+        )
+    return parents
+
+
 def validate_plausible_trajectory(dataset, trajectory_id):
     if dataset == "synthetic":
         return False, "Synthetic trajectories cannot be reviewed as plausible."
@@ -433,6 +755,10 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                 return self.timeline(query)
             if parsed.path == "/api/trajectories":
                 return self.trajectories(query)
+            if parsed.path == "/api/trajectory_bubbles":
+                return self.trajectory_bubbles(query)
+            if parsed.path == "/api/trajectory_score_distribution":
+                return self.trajectory_score_distribution(query)
             if parsed.path == "/api/stats":
                 return self.stats(query)
             return self.static_file(parsed.path)
@@ -729,6 +1055,253 @@ class VisualizationHandler(BaseHTTPRequestHandler):
         if not dataset or not trajectory_ids:
             raise ValueError("dataset and trajectory_ids are required")
         self.send_json(canonical_payload(dataset, trajectory_ids, model_id))
+
+    def trajectory_bubbles(self, query):
+        dataset = query.get("dataset", [""])[0]
+        if not dataset:
+            raise ValueError("dataset is required")
+
+        zoom = max(0, min(24, int(float(query.get("zoom", ["2"])[0]))))
+        cell_size = max(32, min(240, int(float(query.get("cell_size", ["90"])[0]))))
+        parent_descriptors = parse_parent_bubbles(query.get("parents", [""])[0])
+
+        try:
+            frame = load_trajectory_bubble_frame(dataset)
+        except FileNotFoundError as exc:
+            self.send_json({"error": str(exc)}, 404)
+            return
+        filtered = frame
+        score_payload = None
+
+        user_id = query.get("user_id", [""])[0]
+        model_id = query.get("model_id", [""])[0]
+        if user_id:
+            filtered = filtered[filtered["user_id"].astype(str) == str(user_id)]
+        if model_id:
+            percentage = float(query.get("anomaly_percentage", ["5.0"])[0])
+            aggregation = query.get("aggregation", ["mean"])[0]
+            transition_score_mode = query.get("transition_score_mode", ["mean"])[0]
+            included_features = query_list(query, "transition_score_features")
+            include_first_transition = query_bool(
+                query,
+                "include_first_transition",
+                default=True,
+            )
+            try:
+                score_payload = model_score_filter_frame(
+                    model_id=model_id,
+                    dataset=dataset,
+                    percentage=percentage,
+                    aggregation=aggregation,
+                    transition_score_mode=transition_score_mode,
+                    included_features=included_features,
+                    include_first_transition=include_first_transition,
+                )
+            except FileNotFoundError as exc:
+                self.send_json({"error": str(exc)}, 404)
+                return
+            score_frame = score_payload["scores"]
+            filtered = filtered.merge(
+                score_frame,
+                on="trajectory_id",
+                how="inner",
+                validate="one_to_one",
+            )
+            raw_score_min = query.get("score_min", [""])[0]
+            raw_score_max = query.get("score_max", [""])[0]
+            if raw_score_min != "":
+                filtered = filtered[
+                    filtered["selected_score"] >= float(raw_score_min)
+                ]
+            if raw_score_max != "":
+                filtered = filtered[
+                    filtered["selected_score"] <= float(raw_score_max)
+                ]
+
+        for parent in parent_descriptors:
+            x, y = mercator_pixels(
+                filtered["lat"].to_numpy(),
+                filtered["lon"].to_numpy(),
+                parent["zoom"],
+            )
+            filtered = filtered[
+                (np.floor(x / parent["cell_size"]).astype(np.int64) == parent["grid_x"])
+                & (np.floor(y / parent["cell_size"]).astype(np.int64) == parent["grid_y"])
+            ]
+
+        has_bounds = all(name in query for name in ("south", "north", "west", "east"))
+        if has_bounds:
+            south = float(query["south"][0])
+            north = float(query["north"][0])
+            west = float(query["west"][0])
+            east = float(query["east"][0])
+            filtered = filtered[
+                (filtered["lat"] >= south)
+                & (filtered["lat"] <= north)
+            ]
+            if west <= east:
+                filtered = filtered[
+                    (filtered["lon"] >= west)
+                    & (filtered["lon"] <= east)
+                ]
+            else:
+                filtered = filtered[
+                    (filtered["lon"] >= west)
+                    | (filtered["lon"] <= east)
+                ]
+
+        if filtered.empty:
+            self.send_json(
+                {
+                    "dataset": dataset,
+                    "total_points": int(len(frame)),
+                    "visible_points": 0,
+                    "cluster_zoom": zoom,
+                    "cell_size": cell_size,
+                    "threshold": finite_json_number(score_payload["threshold"]) if score_payload else None,
+                    "threshold_reference": (
+                        score_payload["threshold_reference"]
+                        if score_payload else None
+                    ),
+                    "clusters": [],
+                }
+            )
+            return
+
+        clustered = filtered.copy()
+        x, y = mercator_pixels(
+            clustered["lat"].to_numpy(),
+            clustered["lon"].to_numpy(),
+            zoom,
+        )
+        clustered["_grid_x"] = np.floor(x / cell_size).astype(np.int64)
+        clustered["_grid_y"] = np.floor(y / cell_size).astype(np.int64)
+
+        clusters = []
+        for (grid_x, grid_y), group in clustered.groupby(["_grid_x", "_grid_y"], sort=False):
+            count = int(len(group))
+            item = {
+                "count": count,
+                "lat": float(group["lat"].mean()),
+                "lon": float(group["lon"].mean()),
+                "bounds": {
+                    "south": float(group["lat"].min()),
+                    "north": float(group["lat"].max()),
+                    "west": float(group["lon"].min()),
+                    "east": float(group["lon"].max()),
+                },
+                "parent": {
+                    "zoom": zoom,
+                    "cell_size": cell_size,
+                    "grid_x": int(grid_x),
+                    "grid_y": int(grid_y),
+                },
+            }
+            if "selected_score" in group:
+                item["score_summary"] = {
+                    "min": float(group["selected_score"].min()),
+                    "max": float(group["selected_score"].max()),
+                    "mean": float(group["selected_score"].mean()),
+                }
+            if count <= 50:
+                item["trajectory_ids"] = [
+                    int(value) for value in group["trajectory_id"].tolist()
+                ]
+            if count == 1:
+                row = group.iloc[0]
+                item.update(
+                    {
+                        "trajectory_id": int(row["trajectory_id"]),
+                        "user_id": str(row["user_id"]),
+                        "n_transitions": int(row["n_transitions"]),
+                        "start_timestamp": row.get("start_timestamp"),
+                        "end_timestamp": row.get("end_timestamp"),
+                        "date": row.get("date"),
+                    }
+                )
+                if "selected_score" in row:
+                    item["model_score"] = float(row["selected_score"])
+            clusters.append(item)
+
+        clusters.sort(key=lambda item: item["count"], reverse=True)
+        self.send_json(
+            {
+                "dataset": dataset,
+                "total_points": int(len(frame)),
+                "visible_points": int(len(filtered)),
+                "cluster_zoom": zoom,
+                "cell_size": cell_size,
+                "threshold": finite_json_number(score_payload["threshold"]) if score_payload else None,
+                "threshold_reference": (
+                    score_payload["threshold_reference"]
+                    if score_payload else None
+                ),
+                "clusters": clusters,
+            }
+        )
+
+    def trajectory_score_distribution(self, query):
+        dataset = query.get("dataset", [""])[0]
+        model_id = query.get("model_id", [""])[0]
+        if not dataset or not model_id:
+            raise ValueError("dataset and model_id are required")
+        percentage = float(query.get("anomaly_percentage", ["5.0"])[0])
+        aggregation = query.get("aggregation", ["mean"])[0]
+        transition_score_mode = query.get("transition_score_mode", ["mean"])[0]
+        included_features = query_list(query, "transition_score_features")
+        include_first_transition = query_bool(
+            query,
+            "include_first_transition",
+            default=True,
+        )
+        score_payload = model_score_filter_frame(
+            model_id=model_id,
+            dataset=dataset,
+            percentage=percentage,
+            aggregation=aggregation,
+            transition_score_mode=transition_score_mode,
+            included_features=included_features,
+            include_first_transition=include_first_transition,
+        )
+        scores = score_payload["scores"]["selected_score"].dropna().astype(float)
+        total_points = int(len(load_trajectory_bubble_frame(dataset)))
+        if scores.empty:
+            self.send_json(
+                {
+                    "dataset": dataset,
+                    "model_id": model_id,
+                    "count": 0,
+                    "total_points": total_points,
+                    "min": None,
+                    "max": None,
+                    "threshold": finite_json_number(score_payload["threshold"]),
+                    "threshold_reference": score_payload["threshold_reference"],
+                    "histogram": [],
+                }
+            )
+            return
+        counts, edges = np.histogram(scores.to_numpy(), bins=min(60, max(10, int(np.sqrt(len(scores))))))
+        histogram = [
+            {
+                "bin_left": float(edges[index]),
+                "bin_right": float(edges[index + 1]),
+                "count": int(count),
+            }
+            for index, count in enumerate(counts)
+        ]
+        self.send_json(
+            {
+                "dataset": dataset,
+                "model_id": model_id,
+                "count": int(len(scores)),
+                "total_points": total_points,
+                "min": float(scores.min()),
+                "max": float(scores.max()),
+                "threshold": finite_json_number(score_payload["threshold"]),
+                "threshold_reference": score_payload["threshold_reference"],
+                "histogram": histogram,
+            }
+        )
 
     def plausible_trajectories(self, request):
         dataset = request.get("dataset", "")

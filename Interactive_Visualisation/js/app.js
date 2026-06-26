@@ -136,6 +136,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
     leafletMap.on('zoomend', checkZoomLevel);
+    leafletMap.on('zoomend moveend', () => {
+        renderTrajectoryBubbles();
+    });
     checkZoomLevel(); // Initial check
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -173,6 +176,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     updateLegend();
+    initializeTrajectoryBubbleControls();
 
     // Colorblind mode toggle listener
     const colorblindToggle = document.getElementById('colorblind-toggle');
@@ -203,11 +207,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
-    const plausibleButton = document.getElementById('mark-plausible-button');
+    /*const plausibleButton = document.getElementById('mark-plausible-button');
     if (plausibleButton) {
         plausibleButton.addEventListener('click', markSelectedTrajectoriesPlausible);
         updatePlausibleLabelAction();
-    }
+    }*/
 
     let usernames = {};
     try {
@@ -227,8 +231,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     selectElement.addEventListener('change', (event) => {
         const selectedUserId = event.target.value;
         if (selectedUserId) {
-            setUser(selectedUserId); 
+            setUser(selectedUserId);
         }
+        refreshTrajectoryBubblesForFilter();
         syncMppEmptyState();
     });
 
@@ -237,18 +242,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         currentUser = null;
         selectedDate = [];
         syncMppEmptyState();
+        expandedBubbleLayers.forEach(layer => layer.remove());
+        expandedBubbleLayers = [];
         if (leafletMap) {
             currentMarkers.forEach(m => leafletMap.removeLayer(m));
             currentMarkers = [];
             if (window.routePolyline) leafletMap.removeLayer(window.routePolyline);
+            clearTrajectoryBubbleLayer();
+            clearSelectedTrajectoryLayers();
         }
         document.getElementById('timeline').innerHTML = '';
         Plotly.purge('mppPlotly');
-        
+
         selectElement.innerHTML = '<option value="">--Please choose a user--</option>';
 
         const users = await fetchAndParseUsers();
-        
+
         let userCounts = {};
         if (appData && appData.users_list) {
             for (const u of appData.users_list) {
@@ -270,18 +279,21 @@ document.addEventListener('DOMContentLoaded', async () => {
             option.value = user;
             // For Gowalla, there are no usernames, just user IDs. We check currentDatabase.
             const uname = (currentDatabase === 'original' && usernames[user]) ? usernames[user] :
-                          (currentDatabase === 'synthetic' ? user.replace(/_/g, ' ') : `User ${user}`);
+                (currentDatabase === 'synthetic' ? user.replace(/_/g, ' ') : `User ${user}`);
             const count = userCounts[user] || 0;
             option.textContent = `${uname} (${count} trajectories)`;
             fragment.appendChild(option);
         }
         selectElement.appendChild(fragment);
+        refreshTrajectoryBubblesForFilter();
     }
 
     const databaseSelect = document.getElementById('database-select');
     if (databaseSelect) {
         databaseSelect.addEventListener('change', (e) => {
             currentDatabase = e.target.value;
+            scoreDistributionPayload = null;
+            appliedTrajectoryScoreFilter = null;
             updateModelDropdown();
             initializeDataset();
         });
@@ -291,14 +303,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (modelSelect) {
         modelSelect.addEventListener('change', async (e) => {
             currentModelSelection = e.target.value;
+            scoreDistributionPayload = null;
+            appliedTrajectoryScoreFilter = null;
             refreshModelPanels();
+            syncTrajectoryFilterControls();
+            scheduleScoreDistributionRefresh();
             if (currentUser) {
                 await fetchModelScoresForUser(currentUser);
                 setTimeline(currentUser);
                 renderPlotlyProfile(currentUser);
-                if (selectedDate.length > 0) {
-                    updateMapForDate(currentUser, selectedDate);
-                }
             }
         });
     }
@@ -309,15 +322,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         thresholdSlider.addEventListener('input', async (e) => {
             document.getElementById('threshold-percentage').textContent = `${parseFloat(e.target.value).toFixed(1)}%`;
             updatePerformanceMetrics();
+            scoreDistributionPayload = null;
+            appliedTrajectoryScoreFilter = null;
+            scheduleScoreDistributionRefresh();
             clearTimeout(thresholdTimer);
             thresholdTimer = setTimeout(async () => {
                 if (currentUser) {
                     await fetchModelScoresForUser(currentUser);
                     setTimeline(currentUser);
                     renderPlotlyProfile(currentUser);
-                    if (selectedDate.length > 0) {
-                        updateMapForDate(currentUser, selectedDate);
-                    }
                 }
             }, 100);
         });
@@ -330,13 +343,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     ].forEach(id => {
         document.getElementById(id).addEventListener('change', async () => {
             refreshModelPanels();
+            scoreDistributionPayload = null;
+            appliedTrajectoryScoreFilter = null;
+            scheduleScoreDistributionRefresh();
             if (currentUser) {
                 await fetchModelScoresForUser(currentUser);
                 setTimeline(currentUser);
                 renderPlotlyProfile(currentUser);
-                if (selectedDate.length > 0) {
-                    updateMapForDate(currentUser, selectedDate);
-                }
             }
         });
     });
@@ -348,13 +361,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 event.target.checked = true;
             }
             refreshModelPanels();
+            scoreDistributionPayload = null;
+            appliedTrajectoryScoreFilter = null;
+            scheduleScoreDistributionRefresh();
             if (currentUser) {
                 await fetchModelScoresForUser(currentUser);
                 setTimeline(currentUser);
                 renderPlotlyProfile(currentUser);
-                if (selectedDate.length > 0) {
-                    updateMapForDate(currentUser, selectedDate);
-                }
             }
         });
     }
@@ -410,13 +423,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     ].forEach(id => {
         document.getElementById(id).addEventListener('change', async () => {
             updateModelDropdown();
+            syncTrajectoryFilterControls();
+            scoreDistributionPayload = null;
+            appliedTrajectoryScoreFilter = null;
+            scheduleScoreDistributionRefresh();
             if (currentUser && currentModelSelection) {
                 await fetchModelScoresForUser(currentUser);
                 setTimeline(currentUser);
                 renderPlotlyProfile(currentUser);
-                if (selectedDate.length > 0) {
-                    updateMapForDate(currentUser, selectedDate);
-                }
             }
         });
     });

@@ -82,8 +82,8 @@ h1 {
     background: #c2cbc6;
 }
 
-.toolbar-tab:hover+.toolbar-tab,
-.toolbar-tab:has(+ .toolbar-tab:hover) {
+.toolbar-tab:hover+.toolbar-tab:not(.active),
+.toolbar-tab:not(.active):has(+ .toolbar-tab:hover) {
     border-color: #111;
     background: #e3e7e5;
 }
@@ -512,6 +512,141 @@ h1 {
 .model-panel-section {
     padding: 12px 0;
     border-top: 1px solid #ddd;
+}
+
+.map-display-controls {
+    display: grid;
+    gap: 10px;
+}
+
+.filter-controls {
+    display: grid;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid #d6ddd9;
+    border-radius: 6px;
+    background: #f8f9fa;
+    min-width: 0;
+    overflow: hidden;
+}
+
+#score-distribution-plot {
+    width: 100%;
+    min-width: 0;
+    height: 155px;
+}
+
+.score-range-slider {
+    position: relative;
+    height: 28px;
+    min-width: 0;
+}
+
+.score-range-slider input[type="range"] {
+    position: absolute;
+    left: 0;
+    top: 4px;
+    width: 100%;
+    margin: 0;
+    accent-color: #276fbf;
+    background: transparent;
+}
+
+.score-range-slider input[type="range"]::-webkit-slider-thumb {
+    position: relative;
+    z-index: 2;
+}
+
+.score-range-slider input[type="range"]::-moz-range-thumb {
+    position: relative;
+    z-index: 2;
+}
+
+.score-range-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    min-width: 0;
+}
+
+.score-range-controls input {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 6px;
+}
+
+#score-filter-status {
+    min-height: 16px;
+    margin: 0;
+    color: #44514b;
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.bubble-controls {
+    display: grid;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid #d6ddd9;
+    border-radius: 6px;
+    background: #f7faf8;
+}
+
+.bubble-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.bubble-actions button {
+    flex: 1;
+    height: 30px;
+    border: 1px solid #555;
+    border-radius: 4px;
+    background: #333;
+    color: white;
+    cursor: pointer;
+}
+
+.bubble-actions button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+#bubble-status {
+    margin: 0;
+    color: #44514b;
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.trajectory-bubble-marker,
+.trajectory-point-marker {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    border: 2px solid white;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    font-family: sans-serif;
+    font-weight: 700;
+}
+
+.trajectory-bubble-marker {
+    border-radius: 50%;
+    background: #276fbf;
+    color: white;
+}
+
+.trajectory-bubble-marker:hover {
+    background: #184f8c;
+}
+
+.trajectory-point-marker {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: #00a676;
 }
 
 .model-filter-grid,

@@ -152,8 +152,8 @@ async function setUser(user_id) {
     if (globalDaysArray.length > 0) {
         selectedDate = [globalDaysArray[0]];
         renderTimeline();
-        await updateMapForDate(user_id, selectedDate);
     }
+    refreshTrajectoryBubblesForFilter({ clearRoute: true });
     updatePlausibleLabelAction();
 }
 

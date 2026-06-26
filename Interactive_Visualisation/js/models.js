@@ -106,7 +106,8 @@ function updateModelDropdown() {
     
     const dbPrefix = currentDatasetName();
     
-    modelSelect.innerHTML = '';
+    const previousSelection = currentModelSelection;
+    modelSelect.innerHTML = '<option value="">No model selected</option>';
     const filters = {
         model_type: document.getElementById('filter-model-type')?.value || '',
         training_mode: document.getElementById('filter-training-mode')?.value || '',
@@ -124,7 +125,10 @@ function updateModelDropdown() {
         option.textContent = `${m.model_type.replace(/_/g, ' ')} · ${m.features.length} features · ${m.training.epochs} epochs`;
         modelSelect.appendChild(option);
     });
-    currentModelSelection = modelSelect.value;
+    if (previousSelection && relevantModels.some(model => model.model_id === previousSelection)) {
+        modelSelect.value = previousSelection;
+    }
+    currentModelSelection = modelSelect.value || '';
     refreshModelPanels();
 }
 
@@ -250,7 +254,12 @@ function updateModelScoringControls(model) {
 function updateModelInformation() {
     const model = allAvailableModels.find(item => item.model_id === currentModelSelection);
     const content = document.getElementById('model-info-content');
-    if (!model || !content) return;
+    if (!content) return;
+    if (!model) {
+        content.textContent = 'No model selected.';
+        updateModelScoringControls(null);
+        return;
+    }
     populateTransitionFeatureOptions(model);
     updateModelScoringControls(model);
     const scoringMetrics = selectedSyntheticMetrics(model);
