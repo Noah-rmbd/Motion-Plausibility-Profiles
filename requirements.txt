@@ -1,0 +1,19 @@
+# Core Data Science
+numpy
+pandas
+scipy
+scikit-learn
+pyarrow
+
+# Machine Learning
+torch
+
+# Visualization
+matplotlib
+seaborn
+plotly
+kaleido
+
+# Utilities
+geopy
+powerlaw

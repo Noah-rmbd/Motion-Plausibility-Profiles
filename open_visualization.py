@@ -1,5 +1,6 @@
 import argparse
 import csv
+import hashlib
 import json
 import mimetypes
 import sqlite3
@@ -14,6 +15,7 @@ import pandas as pd
 from modeling.plausible_labels import (
     EXTENDED_COLUMNS,
     resolve_plausible_trajectories,
+    resolve_plausible_trajectories_from_processed,
 )
 from modeling.score_aggregation import (
     AGGREGATION_COLUMNS,
@@ -38,6 +40,7 @@ PLAUSIBLE_LABELS_PATH = ROOT / "data/labels/plausible_trajectories.csv"
 CUSTOM_METRICS_CACHE = {}
 TRAJECTORY_BUBBLE_CACHE = {}
 TRAJECTORY_SCORE_FILTER_CACHE = {}
+CUSTOM_METRICS_CACHE_DIR = "custom_metric_variants"
 
 STATS_METRICS = {
     "speed": "transition_metrics",
@@ -46,6 +49,7 @@ STATS_METRICS = {
     "elapsed_time": "transition_metrics",
     "bearing_change": "transition_metrics",
     "trajectory_n_transitions": "trajectory_n_transitions",
+    "avg_elapsed_time": "avg_elapsed_time",
 }
 
 
@@ -105,19 +109,101 @@ def synthetic_metrics(model_id):
     path = prediction_root / model_id / "synthetic" / "metrics.json"
     if not path.exists():
         return None
-    synthetic_features = (
-        ROOT / "data/features/motion_v2/synthetic/trajectories.parquet"
-    )
-    if (
-        synthetic_features.exists()
-        and synthetic_features.stat().st_mtime > path.stat().st_mtime
-    ):
-        return None
     with path.open("r", encoding="utf-8") as handle:
         metrics = json.load(handle)
     if metrics.get("metrics_schema_version") != 3:
         return None
     return metrics
+
+
+def custom_metrics_cache_payload(
+    model_id,
+    feature_set,
+    aggregation,
+    transition_score_mode,
+    included_features,
+    include_first_transition,
+    reference_datasets,
+):
+    return {
+        "schema": 1,
+        "model_id": model_id,
+        "feature_set": feature_set,
+        "aggregation": aggregation,
+        "transition_score_mode": transition_score_mode,
+        "included_features": list(included_features or []),
+        "include_first_transition": bool(include_first_transition),
+        "reference_datasets": list(reference_datasets),
+    }
+
+
+def custom_metrics_cache_path(model_id, payload):
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    digest = hashlib.sha256(encoded).hexdigest()[:24]
+    return (
+        model_prediction_root(model_id)
+        / model_id
+        / "synthetic"
+        / CUSTOM_METRICS_CACHE_DIR
+        / f"{digest}.json"
+    )
+
+
+def custom_metrics_source_paths(model_id, feature_set, reference_datasets):
+    prediction_root = model_prediction_root(model_id) / model_id
+    paths = [
+        prediction_root / "synthetic" / "trajectory_scores.parquet",
+        prediction_root / "synthetic" / "transition_scores.parquet",
+        ROOT / "data/features" / feature_set / "synthetic" / "trajectories.parquet",
+        PLAUSIBLE_LABELS_PATH,
+    ]
+    for dataset in reference_datasets:
+        paths.extend(
+            [
+                prediction_root / dataset / "trajectory_scores.parquet",
+                prediction_root / dataset / "transition_scores.parquet",
+                ROOT / "data/features" / feature_set / dataset / "trajectories.parquet",
+            ]
+        )
+    review_path = ROOT / "data/labels/trajectory_reviews.csv"
+    if review_path.exists():
+        paths.append(review_path)
+    return [path for path in paths if path.exists()]
+
+
+def read_custom_metrics_cache(path, source_paths):
+    if not path.exists():
+        return None
+    cache_mtime = path.stat().st_mtime
+    if any(source.stat().st_mtime > cache_mtime for source in source_paths):
+        return None
+    with path.open("r", encoding="utf-8") as handle:
+        cached = json.load(handle)
+    metrics = cached.get("metrics")
+    if not metrics:
+        return None
+    metrics = dict(metrics)
+    metrics["metrics_origin"] = "on_demand_disk_cache"
+    return metrics
+
+
+def write_custom_metrics_cache(path, payload, metrics):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cached_metrics = dict(metrics)
+    cached_metrics["metrics_origin"] = "on_demand_disk_cache"
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "cache_schema": 1,
+                "request": payload,
+                "metrics": cached_metrics,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+            handle,
+            separators=(",", ":"),
+        )
 
 
 def model_record(row, datasets):
@@ -164,6 +250,7 @@ def highest_scoring_window_transition_ids(group, window_size=DEFAULT_WINDOW_SIZE
 def canonical_payload(dataset, trajectory_ids, model_id=None):
     if not trajectory_ids:
         return {
+            "dataset": dataset,
             "trajectories": [],
             "transitions": [],
             "observations": [],
@@ -179,13 +266,34 @@ def canonical_payload(dataset, trajectory_ids, model_id=None):
                 [dataset, *trajectory_ids],
             )
         ]
+    existing_ids = [int(row["trajectory_id"]) for row in trajectories]
+    if not existing_ids:
+        return {
+            "dataset": dataset,
+            "trajectories": [],
+            "transitions": [],
+            "observations": [],
+            "trajectory_scores": [],
+            "transition_scores": [],
+        }
 
     base = PROCESSED_ROOT / dataset
     mapping_frame = pd.read_parquet(
         base / "trajectory_transitions.parquet",
-        filters=[("trajectory_id", "in", trajectory_ids)],
+        filters=[("trajectory_id", "in", existing_ids)],
     ).sort_values(["trajectory_id", "transition_order"])
     transition_ids = mapping_frame["transition_id"].tolist()
+    if not transition_ids:
+        return {
+            "dataset": dataset,
+            "trajectories": trajectories,
+            "transitions": [],
+            "observations": [],
+            "trajectory_scores": read_scores(
+                model_id, dataset, "trajectory_scores", existing_ids
+            ).to_dict("records") if model_id else [],
+            "transition_scores": [],
+        }
     transition_frame = pd.read_parquet(
         base / "transitions.parquet",
         filters=[("transition_id", "in", transition_ids)],
@@ -208,14 +316,15 @@ def canonical_payload(dataset, trajectory_ids, model_id=None):
         filters=[("observation_id", "in", observation_ids)],
     ).to_dict("records")
     return {
+        "dataset": dataset,
         "trajectories": trajectories,
         "transitions": mappings,
         "observations": observations,
         "trajectory_scores": read_scores(
-            model_id, dataset, "trajectory_scores", trajectory_ids
+            model_id, dataset, "trajectory_scores", existing_ids
         ).to_dict("records") if model_id else [],
         "transition_scores": read_scores(
-            model_id, dataset, "transition_scores", trajectory_ids
+            model_id, dataset, "transition_scores", existing_ids
         ).to_dict("records") if model_id else [],
     }
 
@@ -319,6 +428,56 @@ def derive_trajectory_centers(dataset):
     )
 
 
+UNPLAUSIBLE_TRAJECTORY_CACHE = {}
+FLIGHT_SPEED_TRAJECTORY_CACHE = {}
+
+
+def load_unplausible_trajectory_ids(dataset):
+    if dataset in UNPLAUSIBLE_TRAJECTORY_CACHE:
+        return UNPLAUSIBLE_TRAJECTORY_CACHE[dataset]
+    base = PROCESSED_ROOT / dataset
+    mapping_path = base / "trajectory_transitions.parquet"
+    transitions_path = base / "transitions.parquet"
+    if not mapping_path.exists() or not transitions_path.exists():
+        UNPLAUSIBLE_TRAJECTORY_CACHE[dataset] = set()
+        return set()
+    mapping = pd.read_parquet(mapping_path, columns=["trajectory_id", "transition_id"])
+    transitions = pd.read_parquet(transitions_path, columns=["transition_id", "transition_plausibility"])
+    unplausible_trans_ids = set(
+        transitions.loc[transitions["transition_plausibility"] == 0, "transition_id"]
+    )
+    unplausible_ids = set(
+        mapping.loc[mapping["transition_id"].isin(unplausible_trans_ids), "trajectory_id"]
+    )
+    UNPLAUSIBLE_TRAJECTORY_CACHE[dataset] = unplausible_ids
+    return unplausible_ids
+
+
+def load_speed_filtered_trajectory_ids(dataset, min_speed_kmh=200.0, only_plausible=True):
+    cache_key = (dataset, float(min_speed_kmh), bool(only_plausible))
+    if cache_key in FLIGHT_SPEED_TRAJECTORY_CACHE:
+        return FLIGHT_SPEED_TRAJECTORY_CACHE[cache_key]
+    base = PROCESSED_ROOT / dataset
+    mapping_path = base / "trajectory_transitions.parquet"
+    transitions_path = base / "transitions.parquet"
+    if not mapping_path.exists() or not transitions_path.exists():
+        FLIGHT_SPEED_TRAJECTORY_CACHE[cache_key] = set()
+        return set()
+    mapping = pd.read_parquet(mapping_path, columns=["trajectory_id", "transition_id"])
+    transitions = pd.read_parquet(transitions_path, columns=["transition_id", "speed_kmh"])
+    high_speed_trans_ids = set(
+        transitions.loc[transitions["speed_kmh"] > float(min_speed_kmh), "transition_id"]
+    )
+    high_speed_traj_ids = set(
+        mapping.loc[mapping["transition_id"].isin(high_speed_trans_ids), "trajectory_id"]
+    )
+    if only_plausible:
+        unplausible_ids = load_unplausible_trajectory_ids(dataset)
+        high_speed_traj_ids = high_speed_traj_ids - unplausible_ids
+    FLIGHT_SPEED_TRAJECTORY_CACHE[cache_key] = high_speed_traj_ids
+    return high_speed_traj_ids
+
+
 def load_trajectory_bubble_frame(dataset):
     if dataset in TRAJECTORY_BUBBLE_CACHE:
         return TRAJECTORY_BUBBLE_CACHE[dataset]
@@ -339,7 +498,7 @@ def load_trajectory_bubble_frame(dataset):
             SELECT dataset, trajectory_id, user_id, n_transitions,
                    start_timestamp, end_timestamp
             FROM trajectories
-            WHERE dataset = ? AND n_transitions > 0
+            WHERE dataset = ? AND n_transitions > 2
             """,
             conn,
             params=(dataset,),
@@ -352,6 +511,8 @@ def load_trajectory_bubble_frame(dataset):
         validate="one_to_one",
     )
     frame["date"] = frame["start_timestamp"].fillna("").str[:10].str.replace("-", "/")
+    unplausible_ids = load_unplausible_trajectory_ids(dataset)
+    frame["is_unplausible"] = frame["trajectory_id"].isin(unplausible_ids)
     TRAJECTORY_BUBBLE_CACHE[dataset] = frame
     return frame
 
@@ -585,8 +746,8 @@ def validate_plausible_trajectory(dataset, trajectory_id):
     if row is None:
         return False, f"Unknown trajectory: {dataset}/{trajectory_id}"
     row = dict(row)
-    if int(row["n_transitions"]) <= 0:
-        return False, "Trajectory has no transition."
+    if int(row["n_transitions"]) <= 2:
+        return False, "Trajectory has 2 or fewer transitions."
 
     base = PROCESSED_ROOT / dataset
     mapping = pd.read_parquet(
@@ -721,6 +882,220 @@ def plausible_label_metadata_by_trajectory(dataset, user_id, trajectory_rows):
         for trajectory_id, item in trajectories.items()
         if item["labels"]
     }
+
+
+def get_benchmark_user_data(user_id):
+    if user_id == "category:plausible":
+        plausible_df = resolve_plausible_trajectories_from_processed()
+        all_obs, all_trans, all_trajs = [], [], []
+        baseline_reasons = {}
+        for dataset, group in plausible_df.groupby("dataset"):
+            traj_ids = group["trajectory_id"].tolist()
+            payload = canonical_payload(dataset, traj_ids)
+            base = PROCESSED_ROOT / dataset
+            obs_ids = set()
+            for t in payload["transitions"]:
+                obs_ids.add(t["observation_id1"])
+                obs_ids.add(t["observation_id2"])
+            filtered_obs = pd.read_parquet(
+                base / "observations.parquet",
+                columns=["observation_id", "user_id", "timestamp", "lat", "lon", "is_obscured"],
+                filters=[("observation_id", "in", list(obs_ids))] if obs_ids else None,
+            )
+            
+            traj_by_id = {row["trajectory_id"]: row for row in payload["trajectories"]}
+            for row in payload["transitions"]:
+                trajectory = traj_by_id[row["trajectory_id"]]
+                baseline_unplausible = row.get("transition_plausibility") == 0
+                if baseline_unplausible:
+                    reason = row.get("plausibility_reason") or "Deterministic plausibility policy"
+                    baseline_reasons.setdefault((dataset, row["trajectory_id"]), set()).add(reason)
+                all_trans.append({
+                    **row,
+                    "user_id": user_id,
+                    "date": (trajectory["start_timestamp"] or "")[:10].replace("-", "/"),
+                    "speed": row["speed_kmh"],
+                    "elapsed_time": row["elapsed_time_s"],
+                    "distance": row["distance_m"],
+                    "acceleration": row["acceleration_m_s2"],
+                    "bearing_change": row["bearing_change_rad"],
+                    "baseline_unplausible": baseline_unplausible,
+                    "model_unplausible": False,
+                    "is_unplausible": baseline_unplausible,
+                    "reviewed_plausible": True,
+                    "plausible_label": {"is_plausible_label": True},
+                })
+            
+            mapping = {}
+            for row in payload["transitions"]:
+                mapping.setdefault(row["trajectory_id"], []).append(row["transition_id"])
+                
+            for row in payload["trajectories"]:
+                unp = (dataset, row["trajectory_id"]) in baseline_reasons
+                all_trajs.append({
+                    **row,
+                    "date": (row["start_timestamp"] or "")[:10].replace("-", "/"),
+                    "transitions": mapping.get(row["trajectory_id"], []),
+                    "baseline_unplausible": unp,
+                    "baseline_reasons": sorted(baseline_reasons.get((dataset, row["trajectory_id"]), set())),
+                    "model_unplausible": False,
+                    "is_unplausible": unp,
+                    "reviewed_plausible": True,
+                    "plausible_label": {"is_plausible_label": True},
+                })
+            
+            for row in filtered_obs.to_dict("records"):
+                all_obs.append({
+                    **row,
+                    "date": row["timestamp"],
+                    "long": row["lon"],
+                })
+        return all_obs, all_trans, all_trajs
+
+    elif user_id == "category:unplausible":
+        review_path = ROOT / "data/labels/trajectory_reviews.csv"
+        if not review_path.exists():
+            return [], [], []
+        reviews = pd.read_csv(review_path, dtype=str)
+        unplausible_reviews = reviews.loc[reviews["label"].str.strip().eq("unplausible")]
+        all_obs, all_trans, all_trajs = [], [], []
+        baseline_reasons = {}
+        for dataset, group in unplausible_reviews.groupby("dataset"):
+            traj_ids = group["trajectory_id"].dropna().astype(int).tolist()
+            if not traj_ids:
+                continue
+            payload = canonical_payload(dataset, traj_ids)
+            base = PROCESSED_ROOT / dataset
+            obs_ids = set()
+            for t in payload["transitions"]:
+                obs_ids.add(t["observation_id1"])
+                obs_ids.add(t["observation_id2"])
+            filtered_obs = pd.read_parquet(
+                base / "observations.parquet",
+                columns=["observation_id", "user_id", "timestamp", "lat", "lon", "is_obscured"],
+                filters=[("observation_id", "in", list(obs_ids))] if obs_ids else None,
+            )
+            
+            traj_by_id = {row["trajectory_id"]: row for row in payload["trajectories"]}
+            for row in payload["transitions"]:
+                trajectory = traj_by_id[row["trajectory_id"]]
+                baseline_unplausible = row.get("transition_plausibility") == 0
+                if baseline_unplausible:
+                    reason = row.get("plausibility_reason") or "Deterministic plausibility policy"
+                    baseline_reasons.setdefault((dataset, row["trajectory_id"]), set()).add(reason)
+                all_trans.append({
+                    **row,
+                    "user_id": user_id,
+                    "date": (trajectory["start_timestamp"] or "")[:10].replace("-", "/"),
+                    "speed": row["speed_kmh"],
+                    "elapsed_time": row["elapsed_time_s"],
+                    "distance": row["distance_m"],
+                    "acceleration": row["acceleration_m_s2"],
+                    "bearing_change": row["bearing_change_rad"],
+                    "baseline_unplausible": baseline_unplausible,
+                    "model_unplausible": False,
+                    "is_unplausible": True,
+                    "reviewed_plausible": False,
+                    "plausible_label": None,
+                })
+            
+            mapping = {}
+            for row in payload["transitions"]:
+                mapping.setdefault(row["trajectory_id"], []).append(row["transition_id"])
+                
+            for row in payload["trajectories"]:
+                unp = (dataset, row["trajectory_id"]) in baseline_reasons
+                all_trajs.append({
+                    **row,
+                    "date": (row["start_timestamp"] or "")[:10].replace("-", "/"),
+                    "transitions": mapping.get(row["trajectory_id"], []),
+                    "baseline_unplausible": unp,
+                    "baseline_reasons": sorted(baseline_reasons.get((dataset, row["trajectory_id"]), set())),
+                    "model_unplausible": False,
+                    "is_unplausible": True,
+                    "reviewed_plausible": False,
+                    "plausible_label": None,
+                })
+            
+            for row in filtered_obs.to_dict("records"):
+                all_obs.append({
+                    **row,
+                    "date": row["timestamp"],
+                    "long": row["lon"],
+                })
+        return all_obs, all_trans, all_trajs
+
+    else:
+        profile_name = user_id.split(":")[-1] if ":" in user_id else user_id
+        with connection() as conn:
+            trajectory_rows = [
+                dict(row) for row in conn.execute(
+                    "SELECT * FROM trajectories WHERE dataset = 'synthetic' AND (user_id = ? OR user_id LIKE ?) AND n_transitions > 2 ORDER BY trajectory_id",
+                    (user_id, f"%:{profile_name}")
+                )
+            ]
+        trajectory_ids = [row["trajectory_id"] for row in trajectory_rows]
+        payload = canonical_payload("synthetic", trajectory_ids)
+        base = PROCESSED_ROOT / "synthetic"
+        obs_ids = set()
+        for t in payload["transitions"]:
+            obs_ids.add(t["observation_id1"])
+            obs_ids.add(t["observation_id2"])
+        filtered_obs = pd.read_parquet(
+            base / "observations.parquet",
+            columns=["observation_id", "user_id", "timestamp", "lat", "lon", "is_obscured"],
+            filters=[("observation_id", "in", list(obs_ids))] if obs_ids else None,
+        )
+        trajectory_by_id = {row["trajectory_id"]: row for row in payload["trajectories"]}
+        transitions = []
+        baseline_reasons = {}
+        for row in payload["transitions"]:
+            trajectory = trajectory_by_id[row["trajectory_id"]]
+            baseline_unplausible = row.get("transition_plausibility") == 0
+            if baseline_unplausible:
+                reason = row.get("plausibility_reason") or "Deterministic plausibility policy"
+                baseline_reasons.setdefault(row["trajectory_id"], set()).add(reason)
+            transitions.append({
+                **row,
+                "user_id": user_id,
+                "date": (trajectory["start_timestamp"] or "")[:10].replace("-", "/"),
+                "speed": row["speed_kmh"],
+                "elapsed_time": row["elapsed_time_s"],
+                "distance": row["distance_m"],
+                "acceleration": row["acceleration_m_s2"],
+                "bearing_change": row["bearing_change_rad"],
+                "baseline_unplausible": baseline_unplausible,
+                "model_unplausible": False,
+                "is_unplausible": baseline_unplausible,
+                "reviewed_plausible": False,
+                "plausible_label": None,
+            })
+        mapping = {}
+        for row in payload["transitions"]:
+            mapping.setdefault(row["trajectory_id"], []).append(row["transition_id"])
+        trajectories = [
+            {
+                **row,
+                "date": (row["start_timestamp"] or "")[:10].replace("-", "/"),
+                "transitions": mapping.get(row["trajectory_id"], []),
+                "baseline_unplausible": row["trajectory_id"] in baseline_reasons,
+                "baseline_reasons": sorted(baseline_reasons.get(row["trajectory_id"], set())),
+                "model_unplausible": False,
+                "is_unplausible": row["trajectory_id"] in baseline_reasons,
+                "reviewed_plausible": False,
+                "plausible_label": None,
+            }
+            for row in trajectory_rows
+        ]
+        observations = [
+            {
+                **row,
+                "date": row["timestamp"],
+                "long": row["lon"],
+            }
+            for row in filtered_obs.to_dict("records")
+        ]
+        return observations, transitions, trajectories
 
 
 class VisualizationHandler(BaseHTTPRequestHandler):
@@ -875,6 +1250,26 @@ class VisualizationHandler(BaseHTTPRequestHandler):
         if cache_key in CUSTOM_METRICS_CACHE:
             self.send_json(CUSTOM_METRICS_CACHE[cache_key])
             return
+        cache_payload = custom_metrics_cache_payload(
+            model_id=model_id,
+            feature_set=model_row["feature_set"],
+            aggregation=aggregation,
+            transition_score_mode=transition_score_mode,
+            included_features=included_features,
+            include_first_transition=include_first_transition,
+            reference_datasets=reference_datasets,
+        )
+        disk_cache_path = custom_metrics_cache_path(model_id, cache_payload)
+        source_paths = custom_metrics_source_paths(
+            model_id=model_id,
+            feature_set=model_row["feature_set"],
+            reference_datasets=reference_datasets,
+        )
+        cached_metrics = read_custom_metrics_cache(disk_cache_path, source_paths)
+        if cached_metrics is not None:
+            CUSTOM_METRICS_CACHE[cache_key] = cached_metrics
+            self.send_json(cached_metrics)
+            return
         metrics = evaluate_synthetic_predictions(
             model_id=model_id,
             prediction_root=model_prediction_root(model_id),
@@ -889,8 +1284,13 @@ class VisualizationHandler(BaseHTTPRequestHandler):
             ignore_first_transition=not include_first_transition,
             _write_output=False,
         )
+        metrics["metrics_origin"] = "on_demand"
+        write_custom_metrics_cache(disk_cache_path, cache_payload, metrics)
         CUSTOM_METRICS_CACHE[cache_key] = metrics
         self.send_json(metrics)
+
+
+
 
     def users(self, query):
         dataset = query.get("dataset", [""])[0]
@@ -898,12 +1298,47 @@ class VisualizationHandler(BaseHTTPRequestHandler):
         limit = min(int(query.get("limit", ["100"])[0]), 500)
         if not dataset:
             raise ValueError("dataset is required")
-        sql = "SELECT * FROM users WHERE dataset = ? AND trajectory_count > 0"
+        if dataset in {"synthetic", "benchmark"}:
+            review_unplausible_count = 0
+            review_path = ROOT / "data/labels/trajectory_reviews.csv"
+            if review_path.exists():
+                reviews = pd.read_csv(review_path, dtype=str)
+                if "label" in reviews.columns:
+                    review_unplausible_count = len(reviews.loc[reviews["label"].str.strip().eq("unplausible")])
+            plausible_count = len(resolve_plausible_trajectories_from_processed())
+            items = [
+                {"user_id": "category:plausible", "username": "Labelled as plausible", "observation_count": 0, "trajectory_count": plausible_count},
+                {"user_id": "category:unplausible", "username": "Labelled as unplausible", "observation_count": 0, "trajectory_count": review_unplausible_count},
+                {"user_id": "profile:back_and_forth", "username": "back_and_forth", "observation_count": 0, "trajectory_count": 100},
+                {"user_id": "profile:abnormal_speed", "username": "abnormal_speed", "observation_count": 0, "trajectory_count": 100},
+                {"user_id": "profile:initial_fix_jump", "username": "initial_fix_jump", "observation_count": 0, "trajectory_count": 100},
+                {"user_id": "profile:coordinate_jitter", "username": "coordinate_jitter", "observation_count": 0, "trajectory_count": 100},
+                {"user_id": "profile:timestamp_jitter", "username": "timestamp_jitter", "observation_count": 0, "trajectory_count": 100},
+            ]
+            if search:
+                items = [item for item in items if search.lower() in item["username"].lower()]
+            self.send_json(
+                [
+                    {
+                        **row,
+                        "nb_observations": row["observation_count"],
+                        "nb_trajectories": row["trajectory_count"],
+                    }
+                    for row in items
+                ]
+            )
+            return
+        sql = """
+            SELECT u.dataset, u.user_id, u.observation_count, COUNT(t.trajectory_id) AS trajectory_count, u.first_timestamp, u.last_timestamp
+            FROM users u
+            JOIN trajectories t ON u.dataset = t.dataset AND u.user_id = t.user_id
+            WHERE u.dataset = ? AND t.n_transitions > 2
+        """
         params = [dataset]
         if search:
-            sql += " AND user_id LIKE ?"
+            sql += " AND u.user_id LIKE ?"
             params.append(f"%{search}%")
-        sql += " ORDER BY trajectory_count DESC LIMIT ?"
+        sql += " GROUP BY u.dataset, u.user_id HAVING trajectory_count > 0 ORDER BY trajectory_count DESC LIMIT ?"
         params.append(limit)
         with connection() as conn:
             rows = [dict(row) for row in conn.execute(sql, params)]
@@ -924,13 +1359,24 @@ class VisualizationHandler(BaseHTTPRequestHandler):
         user_id = query.get("user_id", [""])[0]
         if not dataset or not user_id:
             raise ValueError("dataset and user_id are required")
+        if dataset in {"synthetic", "benchmark"} or user_id.startswith("category:") or user_id.startswith("profile:"):
+            observations, transitions, trajectories = get_benchmark_user_data(user_id)
+            self.send_json(
+                {
+                    "observations": observations,
+                    "obscured_observations": [row for row in observations if row.get("is_obscured")],
+                    "transitions": transitions,
+                    "trajectories": trajectories,
+                }
+            )
+            return
         with connection() as conn:
             trajectory_rows = [
                 dict(row)
                 for row in conn.execute(
                     """
                     SELECT * FROM trajectories
-                    WHERE dataset = ? AND user_id = ? AND n_transitions > 0
+                    WHERE dataset = ? AND user_id = ? AND n_transitions > 2
                     ORDER BY start_timestamp, trajectory_id
                     """,
                     (dataset, user_id),
@@ -1027,7 +1473,7 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                     """
                     SELECT trajectory_id, n_transitions, start_timestamp, end_timestamp
                     FROM trajectories
-                    WHERE dataset = ? AND user_id = ? AND n_transitions > 0
+                    WHERE dataset = ? AND user_id = ? AND n_transitions > 2
                     ORDER BY start_timestamp, trajectory_id
                     """,
                     (dataset, user_id),
@@ -1075,8 +1521,26 @@ class VisualizationHandler(BaseHTTPRequestHandler):
 
         user_id = query.get("user_id", [""])[0]
         model_id = query.get("model_id", [""])[0]
+        exclude_raw = query.get("exclude_trajectory_ids", [""])[0]
+        if exclude_raw:
+            exclude_ids = {int(val) for val in exclude_raw.split(",") if val.strip().isdigit()}
+            if exclude_ids:
+                filtered = filtered[~filtered["trajectory_id"].isin(exclude_ids)]
         if user_id:
             filtered = filtered[filtered["user_id"].astype(str) == str(user_id)]
+        min_transition_speed = query.get("min_transition_speed", [""])[0]
+        if min_transition_speed:
+            try:
+                min_speed_val = float(min_transition_speed)
+                exclude_unplausible = query_bool(query, "exclude_unplausible", default=True)
+                speed_filtered_ids = load_speed_filtered_trajectory_ids(
+                    dataset, min_speed_val, only_plausible=exclude_unplausible
+                )
+                filtered = filtered[filtered["trajectory_id"].isin(speed_filtered_ids)]
+                if exclude_unplausible and "is_unplausible" in filtered.columns:
+                    filtered = filtered[~filtered["is_unplausible"]]
+            except (ValueError, TypeError):
+                pass
         if model_id:
             percentage = float(query.get("anomaly_percentage", ["5.0"])[0])
             aggregation = query.get("aggregation", ["mean"])[0]
@@ -1203,12 +1667,13 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                     "max": float(group["selected_score"].max()),
                     "mean": float(group["selected_score"].mean()),
                 }
-            if count <= 50:
+            if count <= 10:
                 item["trajectory_ids"] = [
                     int(value) for value in group["trajectory_id"].tolist()
                 ]
             if count == 1:
                 row = group.iloc[0]
+                is_unplausible = bool(row.get("is_unplausible", False))
                 item.update(
                     {
                         "trajectory_id": int(row["trajectory_id"]),
@@ -1217,10 +1682,14 @@ class VisualizationHandler(BaseHTTPRequestHandler):
                         "start_timestamp": row.get("start_timestamp"),
                         "end_timestamp": row.get("end_timestamp"),
                         "date": row.get("date"),
+                        "is_unplausible": is_unplausible,
+                        "baseline_unplausible": is_unplausible,
                     }
                 )
                 if "selected_score" in row:
                     item["model_score"] = float(row["selected_score"])
+                if "model_unplausible" in row:
+                    item["model_unplausible"] = bool(row["model_unplausible"])
             clusters.append(item)
 
         clusters.sort(key=lambda item: item["count"], reverse=True)
@@ -1254,28 +1723,59 @@ class VisualizationHandler(BaseHTTPRequestHandler):
             "include_first_transition",
             default=True,
         )
-        score_payload = model_score_filter_frame(
-            model_id=model_id,
-            dataset=dataset,
-            percentage=percentage,
-            aggregation=aggregation,
-            transition_score_mode=transition_score_mode,
-            included_features=included_features,
-            include_first_transition=include_first_transition,
+        distribution_datasets = (
+            ["inat", "gowalla"]
+            if dataset in {"combined_real", "real_combined", "inat+gowalla"}
+            else [dataset]
         )
-        scores = score_payload["scores"]["selected_score"].dropna().astype(float)
-        total_points = int(len(load_trajectory_bubble_frame(dataset)))
+        score_payloads = [
+            model_score_filter_frame(
+                model_id=model_id,
+                dataset=score_dataset,
+                percentage=percentage,
+                aggregation=aggregation,
+                transition_score_mode=transition_score_mode,
+                included_features=included_features,
+                include_first_transition=include_first_transition,
+            )
+            for score_dataset in distribution_datasets
+        ]
+        filtered_scores = []
+        for score_dataset, payload in zip(distribution_datasets, score_payloads):
+            bubble_frame = load_trajectory_bubble_frame(score_dataset)
+            valid_ids = set(bubble_frame["trajectory_id"])
+            frame_scores = payload["scores"]
+            valid_scores = frame_scores.loc[
+                frame_scores["trajectory_id"].isin(valid_ids), "selected_score"
+            ]
+            filtered_scores.append(valid_scores.dropna().astype(float))
+        scores = pd.concat(filtered_scores, ignore_index=True)
+        total_points = sum(
+            int(len(load_trajectory_bubble_frame(score_dataset)))
+            for score_dataset in distribution_datasets
+        )
+        threshold_reference = (
+            "iNaturalist + Gowalla score distribution"
+            if len(distribution_datasets) > 1
+            else score_payloads[0]["threshold_reference"]
+        )
+        threshold = (
+            float(scores.quantile(1.0 - percentage / 100.0))
+            if len(distribution_datasets) > 1 and not scores.empty
+            else score_payloads[0]["threshold"]
+        )
         if scores.empty:
             self.send_json(
                 {
                     "dataset": dataset,
+                    "distribution_datasets": distribution_datasets,
                     "model_id": model_id,
                     "count": 0,
                     "total_points": total_points,
                     "min": None,
                     "max": None,
-                    "threshold": finite_json_number(score_payload["threshold"]),
-                    "threshold_reference": score_payload["threshold_reference"],
+                    "threshold": finite_json_number(threshold),
+                    "threshold_reference": threshold_reference,
                     "histogram": [],
                 }
             )
@@ -1292,13 +1792,14 @@ class VisualizationHandler(BaseHTTPRequestHandler):
         self.send_json(
             {
                 "dataset": dataset,
+                "distribution_datasets": distribution_datasets,
                 "model_id": model_id,
                 "count": int(len(scores)),
                 "total_points": total_points,
                 "min": float(scores.min()),
                 "max": float(scores.max()),
-                "threshold": finite_json_number(score_payload["threshold"]),
-                "threshold_reference": score_payload["threshold_reference"],
+                "threshold": finite_json_number(threshold),
+                "threshold_reference": threshold_reference,
                 "histogram": histogram,
             }
         )
@@ -1326,7 +1827,7 @@ class VisualizationHandler(BaseHTTPRequestHandler):
         summary_path = STATS_ROOT / "summary.json"
         if not summary_path.exists():
             raise FileNotFoundError(
-                f"{summary_path} does not exist. Run Dataset_Preprocessing/parquet_dataset_stats.py."
+                f"{summary_path} does not exist. Run dataset_preprocessing/parquet_dataset_stats.py."
             )
         with summary_path.open("r", encoding="utf-8") as handle:
             complete_summary = json.load(handle)
@@ -1610,7 +2111,7 @@ class VisualizationHandler(BaseHTTPRequestHandler):
             ]
             is_least_plausible = (
                 score["trajectory_id"] in anomalous_ids
-                and score["transition_id"] in ranked_steps[score["trajectory_id"]]
+                and score["transition_id"] in ranked_steps.get(score["trajectory_id"], set())
             )
             transition_result[str(score["transition_id"])] = {
                 **score,

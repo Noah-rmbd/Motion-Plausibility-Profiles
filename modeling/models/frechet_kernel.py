@@ -7,11 +7,11 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import ConcatDataset
 
-from modeling.base import ModelPlugin
-from modeling.data import load_combined_datasets
-from modeling.evaluation import _write_batch
-from modeling.registry import register_model
-from modeling.scaling import apply_scaler, fit_robust_scaler, load_scaler, save_scaler
+from modeling.framework.base import ModelPlugin
+from modeling.framework.data import load_combined_datasets
+from modeling.evaluation.evaluation import _write_batch
+from modeling.framework.registry import register_model
+from modeling.framework.scaling import apply_scaler, fit_robust_scaler, load_scaler, save_scaler
 
 
 def _load_pyfrk():

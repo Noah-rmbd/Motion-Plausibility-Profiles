@@ -22,7 +22,7 @@ async function loadModelMetrics(modelId) {
     model.synthetic_metrics = await response.json();
     if (currentModelSelection === modelId) {
         updateModelInformation();
-        updatePerformanceMetrics();
+        updatePerformanceMetrics({ loadMissingMetrics: false });
     }
 }
 
@@ -80,7 +80,21 @@ async function loadCurrentScoringMetrics() {
     });
     model.synthetic_metric_variant_promises[key] = fetch(`/api/model_metrics?${params.toString()}`)
         .then(async response => {
-            if (!response.ok) return null;
+            if (!response.ok) {
+                let message = 'Synthetic metrics are unavailable for this feature selection.';
+                try {
+                    const error = await response.json();
+                    message = error.error || message;
+                } catch (e) {
+                    // Keep the generic message when the server did not return JSON.
+                }
+                model.synthetic_metric_variant_errors ||= {};
+                model.synthetic_metric_variant_errors[key] = message;
+                return null;
+            }
+            if (model.synthetic_metric_variant_errors) {
+                delete model.synthetic_metric_variant_errors[key];
+            }
             model.synthetic_metric_variants[key] = await response.json();
             return model.synthetic_metric_variants[key];
         })
@@ -90,14 +104,71 @@ async function loadCurrentScoringMetrics() {
     return model.synthetic_metric_variant_promises[key];
 }
 
-function refreshModelPanels() {
+async function refreshModelPanels({ loadMetrics = true } = {}) {
     updateModelInformation();
-    updatePerformanceMetrics();
-    loadCurrentScoringMetrics().then(metrics => {
-        if (!metrics) return;
-        updateModelInformation();
-        updatePerformanceMetrics();
-    });
+    updatePerformanceMetrics({ loadMissingMetrics: false });
+    if (!loadMetrics) {
+        return selectedSyntheticMetrics(
+            allAvailableModels.find(item => item.model_id === currentModelSelection)
+        );
+    }
+    const metrics = await loadCurrentScoringMetrics();
+    updateModelInformation();
+    updatePerformanceMetrics({ loadMissingMetrics: false });
+    if (!metrics) return null;
+    return metrics;
+}
+
+function getModelFamily(modelType) {
+    switch (modelType) {
+        case 'lstm_autoencoder':
+        case 't_lstm_autoencoder':
+        case 'lstm_seq2seq_autoencoder':
+        case 'lagmm':
+            return {
+                id: 'autoencoder',
+                name: 'Sequential Deep Autoencoders',
+                badge: 'Sequence Reconstruction',
+                description: 'Multi-step sequence reconstruction / latent representation'
+            };
+        case 'lstm_forecaster':
+            return {
+                id: 'forecaster',
+                name: 'Sequential Predictive Forecaster',
+                badge: 'Next-Step Forecast Residual',
+                description: 'Autoregressive next-step transition prediction'
+            };
+        case 'frechet_kernel':
+            return {
+                id: 'kernel',
+                name: 'Geometric Metric Kernels',
+                badge: 'Fréchet Trajectory Dissimilarity',
+                description: 'Non-parametric trajectory geometry comparison against landmarks'
+            };
+        case 'isolation_forest':
+        case 'one_class_svm':
+            return {
+                id: 'pointwise',
+                name: 'Point-Wise Statistical Outlier Models',
+                badge: 'Transition Density Outliers',
+                description: 'Instantaneous transition feature density outlier detection (t ≥ 1)'
+            };
+        case 'global_clustering_iforest':
+        case 'global_clustering_ocsvm':
+            return {
+                id: 'global',
+                name: 'Global Trajectory Clustering Models',
+                badge: 'Global Anomaly Score',
+                description: 'Clustering of full-trajectory features'
+            };
+        default:
+            return {
+                id: 'other',
+                name: 'Other Models',
+                badge: 'Trajectory Model',
+                description: 'General trajectory anomaly model'
+            };
+    }
 }
 
 function updateModelDropdown() {
@@ -119,12 +190,26 @@ function updateModelDropdown() {
         && (!filters.training_mode || modelTrainingMode(m) === filters.training_mode)
         && (!filters.feature_representation || modelFeatureRepresentation(m) === filters.feature_representation)
     );
+
+    const familyGroups = {};
     relevantModels.forEach(m => {
-        const option = document.createElement('option');
-        option.value = m.model_id;
-        option.textContent = `${m.model_type.replace(/_/g, ' ')} · ${m.features.length} features · ${m.training.epochs} epochs`;
-        modelSelect.appendChild(option);
+        const family = getModelFamily(m.model_type);
+        familyGroups[family.name] = familyGroups[family.name] || [];
+        familyGroups[family.name].push(m);
     });
+
+    Object.entries(familyGroups).forEach(([familyName, models]) => {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = familyName;
+        models.forEach(m => {
+            const option = document.createElement('option');
+            option.value = m.model_id;
+            option.textContent = `${m.model_type.replace(/_/g, ' ')} · ${m.features.length} features${m.training.epochs ? ` · ${m.training.epochs} epochs` : ''}`;
+            optgroup.appendChild(option);
+        });
+        modelSelect.appendChild(optgroup);
+    });
+
     if (previousSelection && relevantModels.some(model => model.model_id === previousSelection)) {
         modelSelect.value = previousSelection;
     }
@@ -164,6 +249,8 @@ function formatPipelineValue(value) {
         'mpp_distance_time_bearing': 'MPP ranges, distance, time, bearing',
         'mpp_speed_accel_bearing_distance_time': 'MPP speed, acceleration, distance, time, bearing',
         'mpp_speed_accel_bearing_distance_time_speed': 'MPP speed, speed, acceleration, distance, time, bearing',
+        'mpp_speed_accel_bearing16_distance_time_speed': 'MPP speed, speed, acceleration, distance, time, 16 bearing regions',
+        'mpp_speed_accel_bearing16_cyclic_distance_time_speed': 'MPP speed, speed, acceleration, distance, time, 16 cyclic bearing regions',
         'mpp_speed_accel_distance_time_speed': 'MPP speed, speed, acceleration, distance, time',
         'mpp_speed_bearing_distance_time_speed': 'MPP speed, speed, distance, time, bearing',
         'mean_no_bearing': 'Feature mean, no bearing',
@@ -258,6 +345,7 @@ function updateModelInformation() {
     if (!model) {
         content.textContent = 'No model selected.';
         updateModelScoringControls(null);
+        updateModelThresholdDisplay(null);
         return;
     }
     populateTransitionFeatureOptions(model);
@@ -268,9 +356,13 @@ function updateModelInformation() {
         || (model.model_type === 'lstm_forecaster'
             ? 'forecast error aggregation'
             : 'reconstruction aggregation');
+    const family = getModelFamily(model.model_type);
     content.innerHTML = `
         <dl>
             <dt>Identifier</dt><dd>${model.model_id}</dd>
+            <dt>Model family</dt><dd><strong>${family.name}</strong></dd>
+            <dt>Scoring badge</dt><dd><span class="badge" style="background:#276fbf; color:#fff; padding:2px 6px; border-radius:4px; font-size:11px;">${family.badge}</span></dd>
+            <dt>Approach</dt><dd>${family.description}</dd>
             <dt>Type</dt><dd>${model.model_type.replace(/_/g, ' ')}</dd>
             <dt>Feature set</dt><dd>${model.feature_set}</dd>
             <dt>Features</dt><dd>${model.features.join(', ')}</dd>
@@ -284,6 +376,18 @@ function updateModelInformation() {
             <dt>Final loss</dt><dd>${formatModelScore(model.final_loss)}</dd>
             <dt>Trusted-label AUC</dt><dd>${metrics ? Number(metrics.roc_auc).toFixed(3) : '--'}</dd>
         </dl>`;
+}
+
+function updateModelThresholdDisplay(threshold, reference = '') {
+    const thresholdValue = document.getElementById('threshold-value');
+    const thresholdReference = document.getElementById('threshold-reference');
+    if (thresholdValue) {
+        thresholdValue.textContent = `Threshold: ${formatModelScore(threshold)}`;
+    }
+    if (thresholdReference) {
+        thresholdReference.textContent = reference;
+    }
+    currentThreshold = Number.isFinite(Number(threshold)) ? Number(threshold) : Infinity;
 }
 
 function formatMetric(value) {
@@ -303,7 +407,7 @@ function profileDisplayName(profile) {
     return profile.replace(/_/g, ' ').replace(/\b\w/g, letter => letter.toUpperCase());
 }
 
-function updatePerformanceMetrics() {
+function updatePerformanceMetrics({ loadMissingMetrics = true } = {}) {
     const model = allAvailableModels.find(item => item.model_id === currentModelSelection);
     const content = document.getElementById('performance-content');
     const cutoff = document.getElementById('performance-cutoff');
@@ -315,22 +419,32 @@ function updatePerformanceMetrics() {
     if (!model || !model.synthetic_metrics) {
         auc.textContent = 'AUC --';
         content.textContent = 'Synthetic metrics are not available for this model.';
+        updateModelThresholdDisplay(null);
         return;
     }
     if (model.synthetic_metrics.metrics_schema_version !== 3) {
         auc.textContent = 'AUC --';
         content.textContent = 'Synthetic metrics use an obsolete evaluation schema. Rebuild them.';
+        updateModelThresholdDisplay(null);
         return;
     }
     const scoringMetrics = selectedSyntheticMetrics(model);
     const metrics = scoringMetrics;
+    const settings = currentScoringSettings();
+    const metricsKey = scoringMetricsKey(settings);
+    const metricError = settings.transition_score_features
+        ? model.synthetic_metric_variant_errors?.[metricsKey]
+        : null;
     if (!metrics || !metrics.threshold_metrics || !metrics.threshold_metrics.length) {
         auc.textContent = 'AUC --';
-        content.textContent = 'Loading synthetic metrics for this score setting.';
-        loadCurrentScoringMetrics().then(() => {
-            updateModelInformation();
-            updatePerformanceMetrics();
-        });
+        content.textContent = metricError || (
+            loadMissingMetrics
+                ? 'Loading synthetic metrics for this score setting.'
+                : 'Synthetic metrics are not loaded for this feature selection.'
+        );
+        if (loadMissingMetrics) {
+            updateModelThresholdDisplay(null, 'Loading threshold for this score setting.');
+        }
         return;
     }
     const selected = metrics.threshold_metrics.reduce((closest, candidate) =>
@@ -340,6 +454,10 @@ function updatePerformanceMetrics() {
             : closest
     );
     const selectedMetrics = selected;
+    updateModelThresholdDisplay(
+        selectedMetrics.threshold,
+        'Reference: unlabeled held-out real score distribution'
+    );
     if (!selectedMetrics.overall || !selectedMetrics.profiles) {
         content.textContent = 'Rebuild synthetic metrics to display precision, recall, and F1.';
         return;
@@ -375,6 +493,9 @@ function updatePerformanceMetrics() {
             ${selectedMetrics.trusted_plausible?.true_negatives ?? '--'} TN
             ${scoringMetrics.paired_source_metrics
                 ? ` · ${formatMetric(scoringMetrics.paired_source_metrics.overall.anomaly_above_source_rate)} score above its source`
+                : ''}
+            ${scoringMetrics.metrics_origin?.startsWith('on_demand')
+                ? ' · computed on demand'
                 : ''}
         </div>`;
 }

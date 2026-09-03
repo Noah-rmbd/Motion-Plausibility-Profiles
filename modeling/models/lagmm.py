@@ -10,18 +10,18 @@ from torch.nn import functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from torch.utils.data import DataLoader
 
-from modeling.base import ModelPlugin
-from modeling.data import collate_trajectories, load_combined_datasets
-from modeling.evaluation import _score_batch, _write_batch
-from modeling.losses import concept_feature_weights, get_loss
-from modeling.registry import register_model
-from modeling.scaling import (
+from modeling.framework.base import ModelPlugin
+from modeling.framework.data import collate_trajectories, load_combined_datasets
+from modeling.evaluation.evaluation import _score_batch, _write_batch
+from modeling.framework.losses import concept_feature_weights, get_loss
+from modeling.framework.registry import register_model
+from modeling.framework.scaling import (
     apply_scaler,
     fit_robust_scaler,
     load_scaler,
     save_scaler,
 )
-from modeling.torch_training import choose_device, set_global_seed
+from modeling.framework.torch_training import choose_device, set_global_seed
 
 
 IMPLEMENTATION = "paper_joint_lagmm_v1"

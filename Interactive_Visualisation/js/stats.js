@@ -8,6 +8,7 @@ const statsMetricMetadata = {
     max_speed: { label: 'Maximum trajectory speed', unit: 'km/h' },
     total_distance: { label: 'Total trajectory distance', unit: 'm' },
     total_elapsed_time: { label: 'Total trajectory elapsed time', unit: 's' },
+    avg_elapsed_time: { label: 'Average transition elapsed time', unit: 's' },
     model_score: { label: 'Model anomaly score', unit: 'score' }
 };
 
@@ -26,7 +27,45 @@ function downloadStatsFile(filename, content, type) {
     URL.revokeObjectURL(link.href);
 }
 
+function updateStatsControlStates() {
+    const subset = document.getElementById('stats-subset').value;
+    const metricSelect = document.getElementById('stats-metric');
+    if (!metricSelect) return;
+
+    const isTransitionPopulation = subset === 'transition_flagged' || subset === 'transition_accepted';
+    const isModelPopulation = [
+        'model_flagged',
+        'model_accepted',
+        'transition_flagged',
+        'transition_accepted'
+    ].includes(subset);
+
+    const trajectoryMetrics = ['trajectory_n_transitions', 'max_speed', 'total_distance', 'total_elapsed_time', 'avg_elapsed_time', 'model_score'];
+    const modelOnlyMetrics = ['max_speed', 'total_distance', 'total_elapsed_time', 'model_score'];
+
+    Array.from(metricSelect.options).forEach(option => {
+        const val = option.value;
+        if (trajectoryMetrics.includes(val)) {
+            if (isTransitionPopulation) {
+                option.disabled = true;
+            } else if (!isModelPopulation && modelOnlyMetrics.includes(val)) {
+                option.disabled = true;
+            } else {
+                option.disabled = false;
+            }
+        } else {
+            option.disabled = false;
+        }
+    });
+
+    const selectedOption = metricSelect.options[metricSelect.selectedIndex];
+    if (selectedOption && selectedOption.disabled) {
+        metricSelect.value = 'speed';
+    }
+}
+
 async function loadDatasetStats() {
+    updateStatsControlStates();
     const dataset = document.getElementById('stats-dataset').value;
     const subset = document.getElementById('stats-subset').value;
     const metric = document.getElementById('stats-metric').value;
@@ -36,11 +75,6 @@ async function loadDatasetStats() {
         'transition_flagged',
         'transition_accepted'
     ].includes(subset);
-    const isTransitionPopulation = subset === 'transition_flagged' || subset === 'transition_accepted';
-    if (isTransitionPopulation && ['trajectory_n_transitions', 'max_speed', 'total_distance', 'total_elapsed_time'].includes(metric)) {
-        document.getElementById('stats-metric').value = 'speed';
-        return loadDatasetStats();
-    }
     let response;
     if (isModelPopulation) {
         if (!currentModelSelection) {
@@ -66,10 +100,6 @@ async function loadDatasetStats() {
             })
         });
     } else {
-        if (['max_speed', 'total_distance', 'total_elapsed_time', 'model_score'].includes(metric)) {
-            document.getElementById('stats-metric').value = 'speed';
-            return loadDatasetStats();
-        }
         response = await fetch(`/api/stats?dataset=${dataset}&subset=${subset}&metric=${metric}`);
     }
     if (!response.ok) {
@@ -84,6 +114,10 @@ function renderDatasetStats(payload) {
     const metadata = statsMetricMetadata[payload.metric];
     const summary = payload.summary;
     const quantiles = summary.quantiles || {};
+    const isTransitionScope = payload.subset === 'transition_flagged' || payload.subset === 'transition_accepted';
+    const scopeLabel = isTransitionScope ? 'Scope: Step Level (Transition)' : 'Scope: Sequence Level (Trajectory)';
+    const scopeClass = isTransitionScope ? 'badge-transition' : 'badge-trajectory';
+
     let modelContext = '';
     if (payload.model_id) {
         if (Number.isFinite(Number(payload.flagged_transitions))) {
@@ -97,6 +131,9 @@ function renderDatasetStats(payload) {
         }
     }
     document.getElementById('stats-summary').innerHTML = `
+        <div class="stats-scope-container">
+            <span class="stats-scope-badge ${scopeClass}">${scopeLabel}</span>
+        </div>
         <dl>
             <dt>Trajectories</dt><dd>${payload.n_trajectories.toLocaleString()}</dd>
             <dt>Transitions</dt><dd>${payload.n_transitions.toLocaleString()}</dd>
@@ -106,6 +143,9 @@ function renderDatasetStats(payload) {
             <dt>P99</dt><dd>${formatStatNumber(quantiles.p99)} ${metadata.unit}</dd>
             ${modelContext}
         </dl>`;
+
+    const scaleType = document.getElementById('stats-scale')?.value || 'linear';
+    const isLogScale = scaleType === 'log';
 
     const traces = [{
         type: 'bar',
@@ -117,7 +157,7 @@ function renderDatasetStats(payload) {
             )
         ),
         x: payload.histogram.map(bin => (bin.bin_left + bin.bin_right) / 2),
-        y: payload.histogram.map(bin => bin.count),
+        y: payload.histogram.map(bin => (isLogScale ? (bin.count > 0 ? bin.count : null) : bin.count)),
         width: payload.histogram.map(bin => bin.bin_right - bin.bin_left),
         marker: { color: '#287d5b' },
         hovertemplate: `%{x:.4g} ${metadata.unit}<br>%{y:,} rows<extra></extra>`
@@ -127,7 +167,7 @@ function renderDatasetStats(payload) {
             type: 'bar',
             name: payload.comparison_label,
             x: payload.comparison_histogram.map(bin => (bin.bin_left + bin.bin_right) / 2),
-            y: payload.comparison_histogram.map(bin => bin.count),
+            y: payload.comparison_histogram.map(bin => (isLogScale ? (bin.count > 0 ? bin.count : null) : bin.count)),
             width: payload.comparison_histogram.map(bin => bin.bin_right - bin.bin_left),
             marker: { color: '#9aa2a0', opacity: 0.48 },
             hovertemplate: `%{x:.4g} ${metadata.unit}<br>%{y:,} rows<extra></extra>`
@@ -137,7 +177,12 @@ function renderDatasetStats(payload) {
         margin: { l: 58, r: 18, t: 34, b: 52 },
         title: { text: `${metadata.label} distribution`, font: { size: 14 } },
         xaxis: { title: metadata.unit, fixedrange: false },
-        yaxis: { title: 'Count', fixedrange: false },
+        yaxis: {
+            title: isLogScale ? 'Count (log scale)' : 'Count',
+            type: isLogScale ? 'log' : 'linear',
+            autorange: true,
+            fixedrange: false
+        },
         bargap: 0.02,
         barmode: 'overlay',
         paper_bgcolor: 'white',

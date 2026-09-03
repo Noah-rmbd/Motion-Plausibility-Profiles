@@ -89,6 +89,9 @@ function setLeftPanelView(view) {
         tabs[name].classList.toggle('active', active);
         tabs[name].setAttribute('aria-selected', String(active));
     });
+    if (view === 'map') {
+        restoreScoreDistributionView();
+    }
     setTimeout(() => {
         if (leafletMap) leafletMap.invalidateSize();
     }, 0);
@@ -119,6 +122,170 @@ function syncMppEmptyState() {
     plot.hidden = needsUser;
 }
 
+function syncModelActionButtons() {
+    const thresholdButton = document.getElementById('save-threshold-button');
+    if (thresholdButton) {
+        thresholdButton.disabled = !currentModelSelection || modelConfigurationDirty;
+    }
+}
+
+function markModelConfigurationDirty(message = 'Model settings changed. Save model to load metrics for this configuration.') {
+    modelConfigurationDirty = true;
+    thresholdConfigurationDirty = false;
+    appliedTrajectoryScoreFilter = null;
+    scoreDistributionPayload = null;
+    scoreDistributionSettingsKey = '';
+    scoreRangeSelection = null;
+    updateScoreFilterControls(message);
+    const status = document.getElementById('save-model-status');
+    if (status) status.textContent = message;
+    syncModelActionButtons();
+}
+
+function markThresholdConfigurationDirty(message = 'Threshold changed. Save threshold to update the map and stats.') {
+    if (modelConfigurationDirty) {
+        const status = document.getElementById('save-model-status');
+        if (status) status.textContent = 'Save model before saving a threshold.';
+        return;
+    }
+    thresholdConfigurationDirty = true;
+    const status = document.getElementById('save-model-status');
+    if (status) status.textContent = message;
+    syncModelActionButtons();
+}
+
+function statsPanelIsActive() {
+    return Boolean(document.getElementById('stats-panel')?.classList.contains('active'));
+}
+
+async function refreshStatsIfVisible() {
+    if (!statsPanelIsActive()) return;
+    try {
+        await loadDatasetStats();
+    } catch (error) {
+        document.getElementById('stats-summary').textContent = error.message;
+    }
+}
+
+async function applyModelConfiguration() {
+    const button = document.getElementById('save-model-button');
+    const status = document.getElementById('save-model-status');
+    if (button) button.disabled = true;
+    if (status) status.textContent = 'Saving model settings...';
+    try {
+        scoreDistributionPayload = null;
+        scoreDistributionSettingsKey = '';
+        scoreRangeSelection = null;
+        appliedTrajectoryScoreFilter = null;
+        modelConfigurationDirty = false;
+        thresholdConfigurationDirty = true;
+        syncModelActionButtons();
+        refreshModelPanels({ loadMetrics: false });
+        if (currentModelSelection && currentTrajectoryFilterCriterion() === 'score') {
+            await loadScoreDistribution();
+            if (scoreDistributionPayload) {
+                updateModelThresholdDisplay(
+                    scoreDistributionPayload.threshold,
+                    `Reference: ${scoreDistributionPayload.threshold_reference || 'score distribution'}`
+                );
+            }
+            const minScore = Number(document.getElementById('score-range-min').value);
+            const maxScore = Number(document.getElementById('score-range-max').value);
+            const settings = currentScoreFilterSettings();
+            if (
+                settings
+                && Number.isFinite(minScore)
+                && Number.isFinite(maxScore)
+                && minScore <= maxScore
+            ) {
+                appliedTrajectoryScoreFilter = {
+                    ...settings,
+                    score_min: minScore,
+                    score_max: maxScore
+                };
+            }
+        }
+        updateScoreFilterControls();
+        refreshTrajectoryBubblesForFilter();
+        if (currentUser && currentModelSelection) {
+            await fetchModelScoresForUser(currentUser);
+            renderPlotlyProfile(currentUser);
+            if (selectedDate.length > 0) {
+                await updateMapForDate(currentUser, selectedDate);
+            }
+        }
+        if (scoreDistributionPayload) updateSelectedScoreRangeSummary();
+        if (status) status.textContent = 'Model saved. Loading synthetic metrics...';
+        refreshModelPanels({ loadMetrics: true })
+            .then(metrics => {
+                if (metrics) {
+                    if (status) status.textContent = 'Model saved. Adjust threshold, then save threshold.';
+                } else if (status) {
+                    status.textContent = 'Model saved, but synthetic metrics are unavailable for this setting.';
+                }
+            })
+            .catch(error => {
+                if (status) status.textContent = error.message || 'Model saved, but metrics failed to load.';
+            });
+    } catch (error) {
+        modelConfigurationDirty = true;
+        if (status) status.textContent = error.message || 'Could not save model settings.';
+    } finally {
+        if (button) button.disabled = false;
+        syncModelActionButtons();
+    }
+}
+
+async function applyThresholdConfiguration() {
+    const button = document.getElementById('save-threshold-button');
+    const status = document.getElementById('save-model-status');
+    if (modelConfigurationDirty) {
+        if (status) status.textContent = 'Save model before saving a threshold.';
+        return;
+    }
+    if (button) button.disabled = true;
+    if (status) status.textContent = 'Applying threshold to map and stats...';
+    try {
+        if (currentModelSelection && currentTrajectoryFilterCriterion() === 'score') {
+            if (!scoreDistributionPayload) {
+                await loadScoreDistribution();
+            }
+            const minScore = Number(document.getElementById('score-range-min').value);
+            const maxScore = Number(document.getElementById('score-range-max').value);
+            const settings = currentScoreFilterSettings();
+            if (
+                settings
+                && Number.isFinite(minScore)
+                && Number.isFinite(maxScore)
+                && minScore <= maxScore
+            ) {
+                appliedTrajectoryScoreFilter = {
+                    ...settings,
+                    score_min: minScore,
+                    score_max: maxScore
+                };
+            }
+        }
+        refreshTrajectoryBubblesForFilter();
+        if (currentUser && currentModelSelection) {
+            await fetchModelScoresForUser(currentUser);
+            setTimeline(currentUser);
+            renderPlotlyProfile(currentUser);
+            if (selectedDate.length > 0) {
+                await updateMapForDate(currentUser, selectedDate);
+            }
+        }
+        await refreshStatsIfVisible();
+        thresholdConfigurationDirty = false;
+        if (status) status.textContent = 'Threshold saved.';
+    } catch (error) {
+        if (status) status.textContent = error.message || 'Could not save threshold.';
+    } finally {
+        if (button) button.disabled = false;
+        syncModelActionButtons();
+    }
+}
+
 // Automatically load and populate the user-select dropdown when the page loads
 document.addEventListener('DOMContentLoaded', async () => {
     // 0. Initialize the Map
@@ -137,7 +304,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     leafletMap.on('zoomend', checkZoomLevel);
     leafletMap.on('zoomend moveend', () => {
-        renderTrajectoryBubbles();
+        renderTrajectoryBubbles({ preserveExpanded: true });
     });
     checkZoomLevel(); // Initial check
 
@@ -177,6 +344,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     updateLegend();
     initializeTrajectoryBubbleControls();
+    initializeTimelineSearch();
+
+    const mutedBasemapToggle = document.getElementById('muted-basemap-toggle');
+    function applyMutedBasemap(enabled) {
+        leafletMap.getContainer().classList.toggle('muted-basemap', Boolean(enabled));
+        localStorage.setItem('mpp-muted-basemap', enabled ? 'true' : 'false');
+    }
+    if (mutedBasemapToggle) {
+        mutedBasemapToggle.checked = localStorage.getItem('mpp-muted-basemap') === 'true';
+        applyMutedBasemap(mutedBasemapToggle.checked);
+        mutedBasemapToggle.addEventListener('change', event => {
+            applyMutedBasemap(event.target.checked);
+        });
+    }
 
     // Colorblind mode toggle listener
     const colorblindToggle = document.getElementById('colorblind-toggle');
@@ -242,47 +423,46 @@ document.addEventListener('DOMContentLoaded', async () => {
         currentUser = null;
         selectedDate = [];
         syncMppEmptyState();
-        expandedBubbleLayers.forEach(layer => layer.remove());
+        expandedBubbleLayers.forEach(item => {
+            const layer = item.layer || item;
+            if (layer && layer.remove) layer.remove();
+        });
         expandedBubbleLayers = [];
         if (leafletMap) {
             currentMarkers.forEach(m => leafletMap.removeLayer(m));
             currentMarkers = [];
             if (window.routePolyline) leafletMap.removeLayer(window.routePolyline);
             clearTrajectoryBubbleLayer();
-            clearSelectedTrajectoryLayers();
         }
         document.getElementById('timeline').innerHTML = '';
+        renderTimeline();
         Plotly.purge('mppPlotly');
 
-        selectElement.innerHTML = '<option value="">--Please choose a user--</option>';
+        selectElement.innerHTML = currentDatabase === 'synthetic'
+            ? '<option value="">--Select profile or label--</option>'
+            : '<option value="">--Please choose a user--</option>';
 
-        const users = await fetchAndParseUsers();
-
-        let userCounts = {};
-        if (appData && appData.users_list) {
-            for (const u of appData.users_list) {
-                userCounts[String(u.username)] = u.nb_trajectories || u.trajectory_count || 0;
-            }
+        const userFilterLabel = document.querySelector('#user-filter-controls label');
+        if (userFilterLabel && userFilterLabel.firstChild) {
+            userFilterLabel.firstChild.textContent = currentDatabase === 'synthetic'
+                ? 'Profile / Label'
+                : 'User';
         }
 
-        users.sort((a, b) => {
-            const countA = userCounts[a] || 0;
-            const countB = userCounts[b] || 0;
-            return countB - countA;
-        });
-
-        const topUsers = users.slice(0, 20000);
+        const users = await fetchAndParseUsers();
         const fragment = document.createDocumentFragment();
 
-        for (const user of topUsers) {
-            const option = document.createElement('option');
-            option.value = user;
-            // For Gowalla, there are no usernames, just user IDs. We check currentDatabase.
-            const uname = (currentDatabase === 'original' && usernames[user]) ? usernames[user] :
-                (currentDatabase === 'synthetic' ? user.replace(/_/g, ' ') : `User ${user}`);
-            const count = userCounts[user] || 0;
-            option.textContent = `${uname} (${count} trajectories)`;
-            fragment.appendChild(option);
+        if (appData && appData.users_list && appData.users_list.length > 0) {
+            for (const uObj of appData.users_list) {
+                const option = document.createElement('option');
+                option.value = uObj.user_id || uObj.username;
+                const uname = (currentDatabase === 'original' && usernames[uObj.user_id])
+                    ? usernames[uObj.user_id]
+                    : (uObj.username || uObj.user_id);
+                const count = uObj.nb_trajectories || uObj.trajectory_count || 0;
+                option.textContent = `${uname} (${count} trajectories)`;
+                fragment.appendChild(option);
+            }
         }
         selectElement.appendChild(fragment);
         refreshTrajectoryBubblesForFilter();
@@ -292,9 +472,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (databaseSelect) {
         databaseSelect.addEventListener('change', (e) => {
             currentDatabase = e.target.value;
-            scoreDistributionPayload = null;
-            appliedTrajectoryScoreFilter = null;
+            const previousModelSelection = currentModelSelection;
             updateModelDropdown();
+            if (previousModelSelection !== currentModelSelection) {
+                markModelConfigurationDirty();
+            }
             initializeDataset();
         });
     }
@@ -303,36 +485,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (modelSelect) {
         modelSelect.addEventListener('change', async (e) => {
             currentModelSelection = e.target.value;
-            scoreDistributionPayload = null;
-            appliedTrajectoryScoreFilter = null;
-            refreshModelPanels();
+            refreshModelPanels({ loadMetrics: false });
             syncTrajectoryFilterControls();
-            scheduleScoreDistributionRefresh();
-            if (currentUser) {
+            markModelConfigurationDirty();
+            if (currentUser && currentModelSelection) {
                 await fetchModelScoresForUser(currentUser);
-                setTimeline(currentUser);
                 renderPlotlyProfile(currentUser);
+                if (selectedDate.length > 0) {
+                    await updateMapForDate(currentUser, selectedDate);
+                }
             }
         });
     }
 
     const thresholdSlider = document.getElementById('threshold-slider');
     if (thresholdSlider) {
-        let thresholdTimer = null;
         thresholdSlider.addEventListener('input', async (e) => {
             document.getElementById('threshold-percentage').textContent = `${parseFloat(e.target.value).toFixed(1)}%`;
-            updatePerformanceMetrics();
-            scoreDistributionPayload = null;
-            appliedTrajectoryScoreFilter = null;
-            scheduleScoreDistributionRefresh();
-            clearTimeout(thresholdTimer);
-            thresholdTimer = setTimeout(async () => {
-                if (currentUser) {
-                    await fetchModelScoresForUser(currentUser);
-                    setTimeline(currentUser);
-                    renderPlotlyProfile(currentUser);
-                }
-            }, 100);
+            updatePerformanceMetrics({ loadMissingMetrics: false });
+            markThresholdConfigurationDirty();
         });
     }
 
@@ -342,15 +513,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         'first-transition-select',
     ].forEach(id => {
         document.getElementById(id).addEventListener('change', async () => {
-            refreshModelPanels();
-            scoreDistributionPayload = null;
-            appliedTrajectoryScoreFilter = null;
-            scheduleScoreDistributionRefresh();
-            if (currentUser) {
-                await fetchModelScoresForUser(currentUser);
-                setTimeline(currentUser);
-                renderPlotlyProfile(currentUser);
-            }
+            markModelConfigurationDirty();
         });
     });
     const transitionFeatureOptions = document.getElementById('transition-feature-options');
@@ -360,15 +523,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!options.some(option => option.checked) && event.target) {
                 event.target.checked = true;
             }
-            refreshModelPanels();
-            scoreDistributionPayload = null;
-            appliedTrajectoryScoreFilter = null;
-            scheduleScoreDistributionRefresh();
-            if (currentUser) {
-                await fetchModelScoresForUser(currentUser);
-                setTimeline(currentUser);
-                renderPlotlyProfile(currentUser);
-            }
+            markModelConfigurationDirty();
         });
     }
 
@@ -383,8 +538,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     closeLeftPanelButton.addEventListener('click', () => {
         closeLeftPanel();
     });
-    ['stats-dataset', 'stats-subset', 'stats-metric'].forEach(id => {
-        document.getElementById(id).addEventListener('change', async () => {
+    document.getElementById('save-model-button')?.addEventListener('click', applyModelConfiguration);
+    document.getElementById('save-threshold-button')?.addEventListener('click', applyThresholdConfiguration);
+    syncModelActionButtons();
+    ['stats-dataset', 'stats-subset', 'stats-metric', 'stats-scale'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', async () => {
             try {
                 await loadDatasetStats();
             } catch (error) {
@@ -411,6 +569,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!currentStatsPayload) return;
         Plotly.downloadImage('stats-plot', {
             format: 'png',
+            filename: `${currentStatsPayload.dataset}_${currentStatsPayload.subset}_${currentStatsPayload.metric}_hd`,
+            width: 2400,
+            height: 1400,
+            scale: 3
+        });
+    });
+    document.getElementById('export-stats-svg')?.addEventListener('click', () => {
+        if (!currentStatsPayload) return;
+        Plotly.downloadImage('stats-plot', {
+            format: 'svg',
             filename: `${currentStatsPayload.dataset}_${currentStatsPayload.subset}_${currentStatsPayload.metric}`,
             width: 1200,
             height: 700
@@ -424,14 +592,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById(id).addEventListener('change', async () => {
             updateModelDropdown();
             syncTrajectoryFilterControls();
-            scoreDistributionPayload = null;
-            appliedTrajectoryScoreFilter = null;
-            scheduleScoreDistributionRefresh();
-            if (currentUser && currentModelSelection) {
-                await fetchModelScoresForUser(currentUser);
-                setTimeline(currentUser);
-                renderPlotlyProfile(currentUser);
-            }
+            markModelConfigurationDirty();
         });
     });
 

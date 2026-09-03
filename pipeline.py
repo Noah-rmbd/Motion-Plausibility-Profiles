@@ -15,7 +15,7 @@ STAGES = (
     "database",
 )
 
-DEFAULT_EXPERIMENT_CONFIG = "modeling/configs/configurable_model_matrix.json"
+DEFAULT_EXPERIMENT_CONFIG = "modeling/configs/current_architecture_three_population.json"
 
 
 def real_datasets(datasets):
@@ -69,7 +69,7 @@ def stage_commands(args):
         "preprocess": [
             python,
             "-m",
-            "dataset_preprocessing.preprocess_logs_to_parquet",
+            "dataset_preprocessing.ingestion.preprocess_logs_to_parquet",
             "--output-dir",
             args.processed_root,
         ],
@@ -77,7 +77,7 @@ def stage_commands(args):
             [
                 python,
                 "-m",
-                "dataset_preprocessing.synthetic_anomalies",
+                "dataset_preprocessing.synthetic.synthetic_anomalies",
                 "--processed-root",
                 args.processed_root,
                 "--output-dir",
@@ -90,7 +90,7 @@ def stage_commands(args):
             [
                 python,
                 "-m",
-                "dataset_preprocessing.build_motion_features",
+                "dataset_preprocessing.features.build_motion_features",
                 "--processed-dir",
                 args.processed_root,
                 "--feature-set",
@@ -107,7 +107,7 @@ def stage_commands(args):
             [
                 python,
                 "-m",
-                "dataset_preprocessing.parquet_dataset_stats",
+                "dataset_preprocessing.stats.parquet_dataset_stats",
                 "--processed-dir",
                 args.processed_root,
                 "--output-dir",
@@ -120,7 +120,7 @@ def stage_commands(args):
             [
                 python,
                 "-m",
-                "modeling.experiments",
+                "modeling.evaluation.experiments",
                 args.experiment_config,
                 "--feature-root",
                 args.feature_root,

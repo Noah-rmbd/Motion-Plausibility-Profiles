@@ -6,7 +6,7 @@ from modeling.models.t_lstm_autoencoder import (
     TLSTMAutoencoderPlugin,
     TimeAwareLSTM,
 )
-from modeling.registry import register_model
+from modeling.framework.registry import register_model
 
 
 class TLSTMSeq2SeqAutoencoder(TLSTMAutoencoder):

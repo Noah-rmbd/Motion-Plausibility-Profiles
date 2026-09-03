@@ -1,0 +1,132 @@
+{
+  "base_config": null,
+  "reference_datasets": ["inat", "gowalla"],
+  "runs": [
+    {
+      "model_id": "v8_lstm_forecaster_bearing16_cyclic_combined_e15",
+      "model_type": "lstm_forecaster",
+      "features": [
+        "speed_stationary",
+        "speed_0_5",
+        "speed_5_10",
+        "speed_10_25",
+        "speed_25_80",
+        "speed_80_140",
+        "speed_140_200",
+        "speed_200_plus",
+        "speed",
+        "acceleration",
+        "acceleration_valid",
+        "bearing_region_sin",
+        "bearing_region_cos",
+        "bearing_valid",
+        "distance",
+        "elapsed_time"
+      ],
+      "architecture": {
+        "hidden_dim": 32,
+        "num_layers": 2,
+        "dropout": 0.0,
+        "forecast_horizon": 1
+      },
+      "training": {
+        "datasets": ["inat", "gowalla"],
+        "sampling_strategy": "all",
+        "epochs": 15
+      },
+      "evaluation": {
+        "datasets": ["inat", "gowalla", "synthetic"],
+        "ignore_first_transition": false
+      },
+      "experiment": {
+        "feature_representation": "mpp_speed_accel_bearing16_cyclic_distance_time_speed",
+        "training_population": "combined",
+        "comparison_group": "lstm_forecaster_bearing16_cyclic"
+      }
+    },
+    {
+      "model_id": "v8_lstm_forecaster_bearing16_cyclic_inat_e15",
+      "model_type": "lstm_forecaster",
+      "features": [
+        "speed_stationary",
+        "speed_0_5",
+        "speed_5_10",
+        "speed_10_25",
+        "speed_25_80",
+        "speed_80_140",
+        "speed_140_200",
+        "speed_200_plus",
+        "speed",
+        "acceleration",
+        "acceleration_valid",
+        "bearing_region_sin",
+        "bearing_region_cos",
+        "bearing_valid",
+        "distance",
+        "elapsed_time"
+      ],
+      "architecture": {
+        "hidden_dim": 32,
+        "num_layers": 2,
+        "dropout": 0.0,
+        "forecast_horizon": 1
+      },
+      "training": {
+        "datasets": ["inat"],
+        "sampling_strategy": "all",
+        "epochs": 15
+      },
+      "evaluation": {
+        "datasets": ["inat", "gowalla", "synthetic"],
+        "ignore_first_transition": false
+      },
+      "experiment": {
+        "feature_representation": "mpp_speed_accel_bearing16_cyclic_distance_time_speed",
+        "training_population": "inat",
+        "comparison_group": "lstm_forecaster_bearing16_cyclic"
+      }
+    },
+    {
+      "model_id": "v8_lstm_forecaster_bearing16_cyclic_gowalla_e15",
+      "model_type": "lstm_forecaster",
+      "features": [
+        "speed_stationary",
+        "speed_0_5",
+        "speed_5_10",
+        "speed_10_25",
+        "speed_25_80",
+        "speed_80_140",
+        "speed_140_200",
+        "speed_200_plus",
+        "speed",
+        "acceleration",
+        "acceleration_valid",
+        "bearing_region_sin",
+        "bearing_region_cos",
+        "bearing_valid",
+        "distance",
+        "elapsed_time"
+      ],
+      "architecture": {
+        "hidden_dim": 32,
+        "num_layers": 2,
+        "dropout": 0.0,
+        "forecast_horizon": 1
+      },
+      "training": {
+        "datasets": ["gowalla"],
+        "sampling_strategy": "all",
+        "epochs": 15
+      },
+      "evaluation": {
+        "datasets": ["inat", "gowalla", "synthetic"],
+        "ignore_first_transition": false
+      },
+      "experiment": {
+        "feature_representation": "mpp_speed_accel_bearing16_cyclic_distance_time_speed",
+        "training_population": "gowalla",
+        "comparison_group": "lstm_forecaster_bearing16_cyclic"
+      }
+    }
+  ]
+}

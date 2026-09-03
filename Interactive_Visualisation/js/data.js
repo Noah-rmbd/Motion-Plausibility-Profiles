@@ -60,11 +60,12 @@ async function fetchModelScoresForUser(user_id) {
             `Reference: ${data.threshold_reference || 'current dataset'}${featureLabel}`;
             
         userTransitions.forEach(t => {
-            const newScores = data.transitions[t.transition_id];
+            const newScores = data.transitions[String(t.transition_id)];
             if (newScores) {
                 t.model_unplausible = newScores.is_unplausible;
                 t.is_unplausible = t.baseline_unplausible || t.model_unplausible;
-                t.reconstruction_error = newScores.mse;
+                t.model_score = Number(newScores.selected_score ?? newScores.mse ?? newScores.score);
+                t.reconstruction_error = t.model_score;
                 const featureMap = {};
                 (newScores.feature_names || []).forEach((name, index) => {
                     featureMap[name] = newScores.features[index];
@@ -74,10 +75,11 @@ async function fetchModelScoresForUser(user_id) {
         });
             
         userTrajectories.forEach(t => {
-            const newScores = data.trajectories[t.trajectory_id];
+            const newScores = data.trajectories[String(t.trajectory_id)];
             if (newScores) {
                 t.model_unplausible = newScores.is_unplausible;
                 t.is_unplausible = t.baseline_unplausible || t.model_unplausible;
+                t.model_score = Number(newScores.selected_score ?? newScores.model_score ?? newScores.score);
             }
         });
     } catch (e) {
@@ -165,7 +167,7 @@ function selectedTrajectoryIdsForPlausibleReview() {
         .filter(traj =>
             String(traj.user_id) === String(currentUser)
             && selectedDays.has(String(traj.date || '').trim())
-            && Number(traj.n_transitions || 0) > 0
+            && Number(traj.n_transitions || 0) > 2
             && !traj.baseline_unplausible
         )
         .map(traj => Number(traj.trajectory_id));

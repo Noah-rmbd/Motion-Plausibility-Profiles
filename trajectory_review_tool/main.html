@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Trajectory Review</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="stylesheet" href="style.css">
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+
+<body>
+    <main id="app">
+        <section id="map"></section>
+        <aside id="review-panel">
+            <header>
+                <h1>Trajectory Review</h1>
+                <p id="status">Loading...</p>
+            </header>
+            <dl id="metadata"></dl>
+            <section id="legend" aria-label="Transition color legend">
+                <h2>Transition colors</h2>
+                <div><span class="swatch c0"></span>0 km/h</div>
+                <div><span class="swatch c5"></span>&lt; 5 km/h</div>
+                <div><span class="swatch c10"></span>&lt; 10 km/h</div>
+                <div><span class="swatch c25"></span>&lt; 25 km/h</div>
+                <div><span class="swatch c80"></span>&lt; 80 km/h</div>
+                <div><span class="swatch c200"></span>&lt; 200 km/h</div>
+                <div><span class="swatch cmax"></span>&ge; 200 km/h</div>
+            </section>
+            <textarea id="notes" placeholder="Optional note"></textarea>
+            <div class="actions">
+                <button id="label-unplausible" class="danger" type="button">Unplausible</button>
+                <button id="label-unsure" class="neutral" type="button">Unsure</button>
+                <button id="label-plausible" class="success" type="button">Plausible</button>
+            </div>
+        </aside>
+    </main>
+    <script src="app.js"></script>
+</body>
+
+</html>

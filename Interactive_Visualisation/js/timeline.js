@@ -111,6 +111,16 @@ function renderTimeline() {
     if (!timelineList || !modeSelect) return;
 
     timelineList.innerHTML = '';
+    const anomalyKey = document.querySelector('.timeline-anomaly-key');
+    if (currentTrajectoryFilterCriterion() === 'score') {
+        if (anomalyKey) anomalyKey.hidden = true;
+        renderSelectedTrajectoryTimeline(timelineList, modeSelect, true);
+        return;
+    }
+
+    if (anomalyKey) anomalyKey.hidden = false;
+    modeSelect.disabled = false;
+    renderSelectedTrajectoryTimeline(timelineList, modeSelect, false);
     const mode = modeSelect.value;
     const tokens = buildTimelineTokens(mode, globalDaysArray);
 
@@ -135,7 +145,14 @@ function renderTimeline() {
         const plausibleCount = tokenTrajectories.filter(
             traj => traj.reviewed_plausible
         ).length;
-        li.title = `${baselineCount} physical-rule violation(s), ${modelCount} model detection(s), ${plausibleCount} reviewed plausible`;
+        const trajectoryIds = tokenTrajectories
+            .map(traj => traj.trajectory_id)
+            .filter(value => value !== undefined && value !== null);
+        const idPreview = trajectoryIds.slice(0, 20).join(', ');
+        const moreIds = trajectoryIds.length > 20 ? `, +${trajectoryIds.length - 20} more` : '';
+        li.title = `${baselineCount} physical-rule violation(s), ${modelCount} model detection(s), ${plausibleCount} reviewed plausible`
+            + `\n${trajectoryIds.length} trajectory/trajectories`
+            + (trajectoryIds.length ? `\nIDs: ${idPreview}${moreIds}` : '');
         if (hasBaselineAnomaly && hasModelAnomaly) {
             li.classList.add('combined-anomaly');
         } else if (hasBaselineAnomaly) {
@@ -185,5 +202,120 @@ function renderTimeline() {
         });
 
         timelineList.appendChild(li);
+    });
+}
+
+function renderSelectedTrajectoryTimeline(timelineList, modeSelect, showEmptyMessage) {
+    modeSelect.disabled = Boolean(showEmptyMessage);
+    const items = Array.from(selectedTrajectoryTimelineItems.values())
+        .sort((a, b) => {
+            const dateCompare = String(a.date || '').localeCompare(String(b.date || ''));
+            if (dateCompare !== 0) return dateCompare;
+            return Number(a.trajectory_id) - Number(b.trajectory_id);
+        });
+
+    if (items.length === 0) {
+        if (!showEmptyMessage) return;
+        const li = document.createElement('li');
+        li.className = 'timeline-day timeline-empty';
+        li.textContent = 'Add a trajectory by id';
+        timelineList.appendChild(li);
+        return;
+    }
+
+    items.forEach(item => {
+        const key = item.key || selectedTrajectoryKey(item.dataset || currentDatasetName(), item.trajectory_id);
+        const id = trajectoryIdKey(item.trajectory_id);
+        const li = document.createElement('li');
+        li.className = 'timeline-day trajectory-token';
+        li.textContent = `${datasetShortLabel(item.dataset)}:${id}`;
+        if (selectedTrajectoryIds.has(key)) {
+            li.classList.add('selected');
+        } else if (hiddenSelectedTrajectoryIds.has(key)) {
+            li.classList.add('hidden-trajectory');
+        }
+        const scoreLabel = item.model_score !== undefined
+            ? `\nScore: ${formatModelScore(item.model_score)}`
+            : '';
+        li.title = `Dataset: ${item.dataset || 'unknown'}\nTrajectory ${id}\nUser: ${item.user_id || 'unknown'}\nDate: ${item.date || 'unknown'}\nTransitions: ${item.n_transitions || '--'}${scoreLabel}`;
+        li.addEventListener('click', () => {
+            toggleSelectedTrajectoryLayer(key);
+        });
+        timelineList.appendChild(li);
+    });
+}
+
+function setTimelineSearchStatus(message) {
+    const status = document.getElementById('timeline-search-status');
+    if (status) status.textContent = message || '';
+}
+
+async function addTrajectoryByIdToTimeline(trajectoryId) {
+    const id = trajectoryIdKey(trajectoryId);
+    if (!id || !/^\d+$/.test(id)) {
+        setTimelineSearchStatus('Invalid id.');
+        return;
+    }
+
+    const searchDatasets = ['inat', 'gowalla'];
+    const existingKeys = searchDatasets
+        .map(dataset => selectedTrajectoryKey(dataset, id))
+        .filter(key => selectedTrajectoryLayers.has(key));
+    if (existingKeys.length > 0) {
+        existingKeys.forEach(showSelectedTrajectoryLayer);
+        setTimelineSearchStatus(`${existingKeys.length} trajectory match(es) shown.`);
+        return;
+    }
+
+    setTimelineSearchStatus('Loading...');
+    let added = 0;
+    const errors = [];
+    for (const dataset of searchDatasets) {
+        const params = new URLSearchParams({
+            dataset,
+            trajectory_ids: id
+        });
+        if (currentModelSelection) params.set('model_id', currentModelSelection);
+
+        try {
+            const response = await fetch(`/api/trajectories?${params.toString()}`);
+            const payload = await response.json();
+            if (!response.ok) {
+                errors.push(payload.error || `${dataset} failed`);
+                continue;
+            }
+            if ((payload.trajectories || []).length === 0) continue;
+            renderSelectedTrajectoryPayload(payload);
+            if (selectedTrajectoryLayers.has(selectedTrajectoryKey(dataset, id))) {
+                added += 1;
+            }
+        } catch (error) {
+            errors.push(error.message || `${dataset} failed`);
+        }
+    }
+
+    if (added === 0) {
+        setTimelineSearchStatus(errors.length ? errors[0] : `No trajectory ${id}.`);
+        return;
+    }
+    setTimelineSearchStatus(`${added} trajectory match(es) added.`);
+    updateBubbleControls(null, `Showing ${selectedTrajectoryIds.size.toLocaleString()} selected trajectories.`);
+}
+
+function initializeTimelineSearch() {
+    const form = document.getElementById('timeline-trajectory-search');
+    const input = document.getElementById('timeline-trajectory-id');
+    if (!form || !input) return;
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        const button = form.querySelector('button[type="submit"]');
+        if (button) button.disabled = true;
+        try {
+            await addTrajectoryByIdToTimeline(input.value.trim());
+        } catch (error) {
+            setTimelineSearchStatus(error.message || 'Could not add.');
+        } finally {
+            if (button) button.disabled = false;
+        }
     });
 }

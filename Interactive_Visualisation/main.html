@@ -112,6 +112,11 @@
                         <span id="threshold-value">Threshold: --</span>
                         <span id="threshold-reference"></span>
                     </div>
+                    <div class="model-apply-controls">
+                        <button id="save-model-button" type="button">Save model</button>
+                        <button id="save-threshold-button" type="button">Save threshold</button>
+                        <span id="save-model-status"></span>
+                    </div>
                 </section>
                 <section id="performance-panel" class="model-panel-section">
                     <div class="performance-heading">
@@ -141,12 +146,13 @@
                         <select name="database" id="database-select">
                             <option value="original">iNaturalist</option>
                             <option value="gowalla">Gowalla</option>
-                            <option value="synthetic">Gowalla (Synthetic Anomalies)</option>
+                            <option value="synthetic">Benchmark trajectories</option>
                         </select>
                     </label>
                     <label>Trajectory filter
                         <select id="trajectory-filter-type">
                             <option value="none">No filter</option>
+                            <option value="flight">Flight speed (&gt;200 km/h)</option>
                             <option value="user">User</option>
                             <option value="score">Plausibility score</option>
                         </select>
@@ -185,6 +191,10 @@
                         Animate route progressively
                     </label>
                     <label>
+                        <input type="checkbox" id="muted-basemap-toggle">
+                        Fade map background
+                    </label>
+                    <label>
                         <input type="checkbox" id="colorblind-toggle">
                         Color deficient mode
                     </label>
@@ -214,26 +224,41 @@
                     </label>
                     <label>Population
                         <select id="stats-subset">
-                            <option value="clean_real">Model-eligible real</option>
-                            <option value="all">Entire dataset</option>
-                            <option value="model_flagged">Flagged by selected model</option>
-                            <option value="model_accepted">Accepted by selected model</option>
-                            <option value="transition_flagged">Flagged transitions by selected model</option>
-                            <option value="transition_accepted">Accepted transitions by selected model</option>
+                            <optgroup label="Trajectory Populations (Sequence Level)">
+                                <option value="clean_real">Model-eligible trajectories</option>
+                                <option value="all">Entire dataset trajectories</option>
+                                <option value="model_flagged">Flagged trajectories by selected model</option>
+                                <option value="model_accepted">Accepted trajectories by selected model</option>
+                            </optgroup>
+                            <optgroup label="Transition Populations (Step Level)">
+                                <option value="transition_flagged">Flagged transitions by selected model</option>
+                                <option value="transition_accepted">Accepted transitions by selected model</option>
+                            </optgroup>
                         </select>
                     </label>
                     <label>Metric
                         <select id="stats-metric">
-                            <option value="speed">Speed</option>
-                            <option value="acceleration">Acceleration</option>
-                            <option value="distance">Distance</option>
-                            <option value="elapsed_time">Elapsed time</option>
-                            <option value="bearing_change">Bearing change</option>
-                            <option value="trajectory_n_transitions">Transitions per trajectory</option>
-                            <option value="max_speed">Maximum trajectory speed</option>
-                            <option value="total_distance">Total trajectory distance</option>
-                            <option value="total_elapsed_time">Total trajectory elapsed time</option>
-                            <option value="model_score">Model anomaly score</option>
+                            <optgroup label="Transition Features (Step Level)">
+                                <option value="speed">Speed</option>
+                                <option value="acceleration">Acceleration</option>
+                                <option value="distance">Distance</option>
+                                <option value="elapsed_time">Elapsed time</option>
+                                <option value="bearing_change">Bearing change</option>
+                            </optgroup>
+                            <optgroup label="Trajectory Features (Sequence Level)">
+                                <option value="trajectory_n_transitions">Transitions per trajectory</option>
+                                <option value="max_speed">Maximum trajectory speed</option>
+                                <option value="total_distance">Total trajectory distance</option>
+                                <option value="total_elapsed_time">Total trajectory elapsed time</option>
+                                <option value="avg_elapsed_time">Average transition elapsed time</option>
+                                <option value="model_score">Model anomaly score</option>
+                            </optgroup>
+                        </select>
+                    </label>
+                    <label>Scale
+                        <select id="stats-scale">
+                            <option value="linear">Linear count</option>
+                            <option value="log">Logarithmic count</option>
                         </select>
                     </label>
                 </section>
@@ -244,7 +269,8 @@
                 <div class="stats-actions">
                     <button id="export-stats-json">JSON</button>
                     <button id="export-stats-csv">CSV</button>
-                    <button id="export-stats-png">PNG</button>
+                    <button id="export-stats-png" title="Export high-resolution 300 DPI PNG image (2400x1400)">PNG (HD)</button>
+                    <button id="export-stats-svg" title="Export scalable vector graphics SVG image">SVG</button>
                 </div>
             </section>
         </div>
@@ -260,6 +286,12 @@
                 <option value="year">Year</option>
                 <option value="smart">Smart Periods</option>
             </select>
+            <form id="timeline-trajectory-search" class="timeline-search">
+                <label for="timeline-trajectory-id">Trajectory</label>
+                <input id="timeline-trajectory-id" type="number" inputmode="numeric" min="0" placeholder="ID">
+                <button type="submit">Add</button>
+                <span id="timeline-search-status"></span>
+            </form>
             <div class="timeline-anomaly-key">
                 <span><i class="baseline-key"></i>Physical rule</span>
                 <span><i class="model-key"></i>Model</span>

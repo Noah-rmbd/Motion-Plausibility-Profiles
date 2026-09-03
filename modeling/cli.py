@@ -2,17 +2,20 @@ import argparse
 import json
 from pathlib import Path
 
-from modeling.config import load_config, write_config
+from modeling.framework.config import load_config, write_config
 from modeling.models import (  # noqa: F401
+    FrechetKernelPlugin,
+    IsolationForestPlugin,
     LAGMMPlugin,
     LSTMAutoencoderPlugin,
     LSTMForecasterPlugin,
     LSTMSeq2SeqAutoencoderPlugin,
+    OneClassSVMPlugin,
     TLSTMAutoencoderPlugin,
     TLSTMSeq2SeqAutoencoderPlugin,
 )
-from modeling.registry import create_model_plugin, registered_models
-from modeling.synthetic_evaluation import evaluate_synthetic_predictions
+from modeling.framework.registry import create_model_plugin, registered_models
+from modeling.evaluation.synthetic_evaluation import evaluate_synthetic_predictions
 
 
 def apply_cli_overrides(config, args):

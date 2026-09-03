@@ -3,9 +3,9 @@ import math
 import torch
 from torch import nn
 
-from modeling.data import collate_context_trajectories
+from modeling.framework.data import collate_context_trajectories
 from modeling.models.lstm_autoencoder import LSTMAutoencoderPlugin
-from modeling.registry import register_model
+from modeling.framework.registry import register_model
 
 
 class TimeAwareLSTMCell(nn.Module):

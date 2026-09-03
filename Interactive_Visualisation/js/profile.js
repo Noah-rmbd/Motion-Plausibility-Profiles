@@ -127,6 +127,14 @@ async function renderPlotlyProfile(user_id) {
                 shapeIndexMap['obs_' + String(t.observation_id2)] = tShapeIdx;
                 const isUnplausible = t.is_unplausible === true;
                 const isReviewedPlausible = t.reviewed_plausible === true;
+
+                let scoreText = '';
+                const scoreVal = t.model_score ?? t.reconstruction_error;
+                if (scoreVal !== undefined && scoreVal !== null) {
+                    scoreText = `<br>Transition score: ${formatModelScore(scoreVal)}`;
+                }
+                const hoverText = `Date: ${t.date}<br>Transition: ${t.transition_id}<br>Speed: ${parseFloat(t.speed).toFixed(1)} km/h<br>Distance: ${parseFloat(t.distance).toFixed(1)} m${scoreText}`;
+
                 shapeList.push({
                     type: "circle",
                     xsizemode: 'pixel', ysizemode: 'pixel',
@@ -139,7 +147,8 @@ async function renderPlotlyProfile(user_id) {
                         : (isReviewedPlausible ? { color: '#00a676', width: 2.5 } : { width: 0 }),
                     fillcolor: fillcolorBySpeed,
                     isUnplausible: isUnplausible,
-                    isReviewedPlausible: isReviewedPlausible
+                    isReviewedPlausible: isReviewedPlausible,
+                    hovertext: hoverText
                 });
                 horizontalOffset += markerSize;
             }
@@ -149,14 +158,15 @@ async function renderPlotlyProfile(user_id) {
 
         const dummyX = shapeList.map(s => s.xanchor);
         const dummyY = shapeList.map(s => s.yanchor);
-        const hoverInfo = dummyX.map(x => validDatesPlotly.has(x) ? 'all' : 'skip');
+        const dummyText = shapeList.map(s => s.hovertext || `Date: ${s.xanchor}`);
 
         const dummyData = [{
             x: dummyX,
             y: dummyY,
+            text: dummyText,
             mode: 'markers',
             marker: { opacity: 0 },
-            hoverinfo: hoverInfo
+            hoverinfo: 'text'
         }];
 
         let layout = {

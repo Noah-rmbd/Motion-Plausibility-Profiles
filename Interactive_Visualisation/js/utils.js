@@ -1,13 +1,13 @@
 let isColorblindMode = false;
 
 const colorPaletteStandard = {
-    c0: 'rgb(0, 0, 0)',
-    c5: 'rgb(26, 150, 65)',
-    c10: 'rgb(166, 217, 106)',
-    c25: 'rgb(203, 203, 15)',
-    c80: 'rgb(253, 174, 97)',
-    c200: 'rgb(215, 25, 28)',
-    cMax: 'rgb(129, 15, 124)'
+    c0: 'rgb(253, 231, 37)',
+    c5: 'rgb(122, 209, 81)',
+    c10: 'rgb(34, 168, 132)',
+    c25: 'rgb(42, 120, 142)',
+    c80: 'rgb(65, 68, 135)',
+    c200: 'rgb(68, 1, 84)',
+    cMax: 'rgb(0, 0, 0)'
 };
 
 const colorPaletteColorblind = {

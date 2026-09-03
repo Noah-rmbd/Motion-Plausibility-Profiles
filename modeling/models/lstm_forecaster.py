@@ -6,13 +6,13 @@ from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from torch.utils.data import DataLoader
 
-from modeling.base import ModelPlugin
-from modeling.data import collate_forecasting_trajectories, load_forecasting_datasets
-from modeling.evaluation import write_forecast_predictions
-from modeling.losses import concept_feature_weights
-from modeling.registry import register_model
-from modeling.scaling import apply_scaler, fit_robust_scaler, load_scaler, save_scaler
-from modeling.torch_training import choose_device, set_global_seed
+from modeling.framework.base import ModelPlugin
+from modeling.framework.data import collate_forecasting_trajectories, load_forecasting_datasets
+from modeling.evaluation.evaluation import write_forecast_predictions
+from modeling.framework.losses import concept_feature_weights
+from modeling.framework.registry import register_model
+from modeling.framework.scaling import apply_scaler, fit_robust_scaler, load_scaler, save_scaler
+from modeling.framework.torch_training import choose_device, set_global_seed
 
 
 class LSTMForecaster(nn.Module):

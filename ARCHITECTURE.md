@@ -43,6 +43,10 @@ data/
       gowalla/
       synthetic/
 
+  labels/
+    plausible_trajectories.csv
+    trajectory_reviews.csv
+
 artifacts/
   scalers/
   stats/
@@ -178,7 +182,7 @@ user (or by time within user) before fitting scalers or models:
 real fit population         fit scaler and model
 real calibration population choose thresholds and measure score drift
 synthetic benchmark         measure controlled anomaly detection
-trusted reviewed sample     estimate real false positives
+trusted reviewed sample     estimate real false positives and real positives
 ```
 
 Synthetic anomalies must not select hyperparameters and then also serve as the only
@@ -204,6 +208,20 @@ user `98904` and Gowalla user `16936` are explicitly reserved for calibration be
 they contain manually reviewed plausible trajectories. Scalers are fitted only on fit
 transitions, models train only on fit trajectories, and threshold curves use only
 calibration trajectories.
+
+Manual benchmark labels are stored outside derived feature tables:
+
+```text
+data/labels/plausible_trajectories.csv  # legacy plausible-only labels
+data/labels/trajectory_reviews.csv      # plausible, unplausible, unsure reviews
+```
+
+The dedicated review tool (`review_trajectories.py`) samples random real iNaturalist
+and Gowalla trajectories from different users and writes one review decision per
+trajectory. `plausible` and `unplausible` labels are benchmark labels. `unsure` is
+recorded only to avoid showing the same trajectory again. Reviewed benchmark
+trajectories must not be used to fit scalers, train models, or calibrate thresholds;
+they are reserved for final benchmark metrics.
 
 Cleaning and scaling are separate decisions, but they do not require storing a second
 full copy of cleaned raw data. The model pipeline reads canonical Parquet, applies its
@@ -568,7 +586,7 @@ should use Parquet.
 The merged preprocessing script is:
 
 ```bash
-python Dataset_Preprocessing/preprocess_logs_to_parquet.py
+python dataset_preprocessing/preprocess_logs_to_parquet.py
 ```
 
 By default it reads:
@@ -588,7 +606,7 @@ data/processed/gowalla/gowalla_frequent_poster.log
 Explicit inputs can be passed with:
 
 ```bash
-python Dataset_Preprocessing/preprocess_logs_to_parquet.py \
+python dataset_preprocessing/preprocess_logs_to_parquet.py \
   --dataset inat=data/raw/iNaturalist/frequent-poster.log \
   --dataset gowalla=data/raw/gowalla/gowalla_frequent_poster.log
 ```
@@ -647,6 +665,49 @@ sampling configuration. The artifact is saved as:
 ```text
 artifacts/models/<model_id>/scaler.pkl
 ```
+
+### Global Trajectory Features (`global_v1`)
+
+A parallel feature set extracts trajectory-level features instead of transition-level features for clustering models:
+
+```bash
+python dataset_preprocessing/build_global_trajectory_features.py
+```
+
+This writes:
+
+```text
+data/features/global_v1/<dataset>/trajectory_features.parquet
+```
+
+`global_v1` stores 12 continuous global motion features:
+
+```text
+efficiency                straight line distance / travelled distance
+detour                    1 / efficiency
+reversal_freq             number of bearing changes > 150° / transitions
+turning_entropy           Shannon entropy of 4 turn directions (U-turn, straight, left, right)
+turn_rate                 sum of bearing changes / distance
+mean_turn_angle           mean absolute bearing change
+convex_hull_area          geographic area of the trajectory footprint
+radius_of_gyration        structural compactness
+num_stops                 number of transitions with speed < 1 km/h
+duration_stops            total elapsed time of stops
+stop_ratio                stop duration / total elapsed time
+median_speed              median speed across transitions
+var_speed                 variance of speed across transitions
+compression_ratio         RDP compressed transitions / original transitions
+temporal_sparsity         Gini coefficient of elapsed times
+displacement_ratio        straight line distance / max pairwise distance
+```
+
+Clustering algorithms (`IsolationForest`, `OneClassSVM`) are trained on these trajectory-level vectors:
+
+```bash
+python modeling/global_trajectory_clustering.py
+```
+
+These models output directly to `artifacts/predictions/global_iforest/<dataset>/trajectory_scores.parquet`. They do not generate transition-level scores because their features represent the trajectory as a whole.
 
 The same scaler is loaded for real calibration trajectories and synthetic benchmark
 trajectories. This gives iNaturalist-only, Gowalla-only, combined, and balanced models
@@ -763,10 +824,10 @@ Synthetic anomalies are transformed with the fitted model scaler and are marked
 The leakage boundary is enforced in three places:
 
 ```text
-Dataset_Preprocessing/preprocess_logs_to_parquet.py
+dataset_preprocessing/preprocess_logs_to_parquet.py
   computes deterministic transition_plausibility
 
-Dataset_Preprocessing/build_motion_features.py
+dataset_preprocessing/build_motion_features.py
   drops every trajectory with at least one implausible transition before feature files are written
   assigns user-level fit/calibration split
   writes use_for_training/use_for_calibration flags
@@ -889,7 +950,7 @@ trajectory from itself.
 Dataset statistics can be extracted from canonical Parquet with:
 
 ```bash
-python Dataset_Preprocessing/parquet_dataset_stats.py
+python dataset_preprocessing/parquet_dataset_stats.py
 ```
 
 This writes:
@@ -1306,16 +1367,14 @@ python -m modeling.cli run \
   --model-id lstm_seq2seq_autoencoder_full_e15_b256
 ```
 
-The following scripts are no longer model-training entry points:
+The following scripts have been moved to `legacy_models/` and are no longer model-training entry points:
 
 ```text
-Dataset_Preprocessing/trajectory_prediction_LSTM.py
-Dataset_Preprocessing/benchmark_LSTM.py
+legacy_models/trajectory_prediction_LSTM.py
+legacy_models/benchmark_LSTM.py
+legacy_models/trajectory_clustering.py
+legacy_models/integrate_predictions.py
+legacy_models/model_error_analysis.py
 ```
 
-They are legacy code. Synthetic generation no longer imports either script. New
-training and benchmark work must use the `modeling` package.
-
-`Dataset_Preprocessing/generate_synthetic_anomalies.py` is now only a thin entry point
-for `dataset_preprocessing.synthetic_anomalies`; it contains no model or generation
-logic.
+They are legacy code archived for reference. New training and benchmark work uses the `modeling` package.

@@ -1,5 +1,7 @@
 from modeling.models.lagmm import LAGMMPlugin
 from modeling.models.frechet_kernel import FrechetKernelPlugin
+from modeling.models.isolation_forest import IsolationForestPlugin
+from modeling.models.one_class_svm import OneClassSVMPlugin
 from modeling.models.lstm_autoencoder import LSTMAutoencoderPlugin
 from modeling.models.lstm_forecaster import LSTMForecasterPlugin
 from modeling.models.lstm_seq2seq_autoencoder import LSTMSeq2SeqAutoencoderPlugin
@@ -11,9 +13,12 @@ from modeling.models.t_lstm_seq2seq_autoencoder import (
 __all__ = [
     "LAGMMPlugin",
     "FrechetKernelPlugin",
+    "IsolationForestPlugin",
+    "OneClassSVMPlugin",
     "LSTMAutoencoderPlugin",
     "LSTMForecasterPlugin",
     "LSTMSeq2SeqAutoencoderPlugin",
     "TLSTMAutoencoderPlugin",
     "TLSTMSeq2SeqAutoencoderPlugin",
 ]
+

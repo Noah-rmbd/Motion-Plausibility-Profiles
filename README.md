@@ -1,217 +1,55 @@
-# Motion Plausibility Profiles
+# Motion Plausibility Profiles: ML Pipeline & Interactive Visualization
 
-## General
-This demo accompanies the following journal article. If you use the results in new projects, create images with it for some future work, or use it in a different way we would appreciate a citation:
+Welcome to the Motion Plausibility Profiles (MPP) advanced pipeline. This repository extends the original 2022 project (see `original_mpp/` folder) by introducing a powerful Machine Learning pipeline for automated trajectory plausibility analysis and a rich interactive web visualization.
 
-Tobias Isenberg, Zujany Salazar, Rafael Blanco, and Catherine Plaisant (2022). Do You Believe Your (Social Media) Data? A Personal Story on Location Data Biases, Errors, and Plausibility as well as their Visualization. IEEE Transactions on Visualization and Computer Graphics, 2022. To appear. doi: [10.1109/TVCG.2022.3141605](https://doi.org/10.1109/TVCG.2022.3141605); open-access version available at https://hal.inria.fr/hal-03516682
+## What is this?
+This project aims to detect implausible GPS trajectories (e.g., GPS jumps, unrealistic speeds) through unsupervised anomaly detection models (Autoencoders, Seq2Seq, etc.) and visualizes the results on an interactive map.
 
-## Bibtex
-```
-@article{Isenberg:2022:DYB,
-  author      = {Tobias Isenberg and Zujany Salazar and Rafael Blanco and Catherine Plaisant},
-  title       = {Do You Believe Your (Social Media) Data? {A} Personal Story on Location Data Biases, Errors, and Plausibility as well as their Visualization},
-  journal     = {IEEE Transactions on Visualization and Computer Graphics},
-  year        = {2022},
-  volume      = {28},
-  number      = {9},
-  month       = sep,
-  pages       = {3277--3291},
-  doi         = {10.1109/TVCG.2022.3141605},
-  shortdoi    = {10/kt4c},
-  doi_url     = {https://doi.org/10.1109/TVCG.2022.3141605},
-  oa_hal_url  = {https://hal.inria.fr/hal-03516682},
-  osf_url     = {https://osf.io/u8ejr/},
-  url         = {https://tobias.isenberg.cc/VideosAndDemos/Isenberg2022DYB},
-  github_url  = {https://github.com/tobiasisenberg/Motion-Plausibility-Profiles},
-  pdf         = {https://tobias.isenberg.cc/personal/papers/Isenberg_2022_DYB.pdf},
-}
+## Quickstart
+
+### 1. Requirements
+
+Install the required Python dependencies:
+```bash
+pip install -r requirements.txt
 ```
 
-## Project website
-https://tobias.isenberg.cc/VideosAndDemos/Isenberg2022DYB
+### 2. Run the ML Pipeline
 
-## Note
-Please note the software is provided "as is".  Use it at your own risk, although data loss is unlikely. Do take the standard precautions like saving your work in other programs.
-
-## License
-![CC BY-SA](https://i.creativecommons.org/l/by-sa/3.0/88x31.png) [Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)](https://creativecommons.org/licenses/by-sa/4.0/)
-(see [license.txt](license.txt)).
-
-## Requirements
-
-### Software Requirements
-The Python3 script requires, in addition to a normal Python3 installation, several packages including (potentially more):
-* ```geopy```
-* ```plotly```
-* ```matplotlib```
-* ```numpy```
-* ```powerlaw```
-* ```kaleido```
-
-Install them using ```pip3 install [package]``` or the respective alternative for your installation of Python 3.
-
-For some functions (but not in the default configuration), the script also needs to be able to call some external programs to do some of the data conversions. In particular:
-* ```gpsbabel```: https://www.gpsbabel.org/
-* ```zip```: e.g., http://infozip.sourceforge.net/
-
-### Data requirements
-The script requires additional CSV data files (named as specified in the ```familyFiles``` list in the script) downloaded from https://www.inaturalist.org/observations/export (if using different files you need to adjust the ```familyFiles``` list).
-
-For the default configuration, please go to [the iNaturalist export page (may require an iNaturalist login)](https://www.inaturalist.org/observations/export) and download the data files for the taxa ```droseraceae```, ```nepenthaceae```, ```sarraceniaceae```, ```roridulaceae```, ```byblidaceae```, ```lentibulariaceae```, ```cephalotaceae```, and ```drosophyllaceae```. To do so, for each taxon, enter the taxon name into the ```taxon``` field on the form, select the suggested family in the pop-up that appears, select ```All``` for ```Geo``` and for ```Taxon``` under Point 3  (```Choose columns```), and then click the ```Create export``` button at the bottom of the page. Each export can take a while to generate based on the size of the family (e.g., families ```droseraceae```, ```nepenthaceae```, ```sarraceniaceae```, and ```lentibulariaceae``` are large and can take several hours each) and you can see the status at the bottom of the export page if you reload it (ask iNaturalist to send you an e-mail with the data once the export is complete). Also note that you can only create one export at a time. Once downloaded, unzip the data and rename the exported ```observations-123456.csv``` (or similar) files from iNaturalist to ```family.csv``` for easier association and to match the name in the script (e.g., ```droseraceae.csv```). Note that only with data files present for all families mentioned above the produced results will be appropriate and similar to those in the paper.
-
-## Configuration
-To configure the script, adjust the flags ```create*``` at the top of the script as needed (but the script runs with the default configuration out of the box). 
-
-## Running the script
-```
-python3 _inaturalist.py
-```
-Note that it is normal to see many lines along the lines of ```No genus name for id: XXXXXXXXX ; scientific name: Abcdefghijk```, this is due to some observations in the data having been entered with only the family name, not the full scientific name. These entries have to be treated differently for the visualization (as explained in the paper).
-
-## Files produced
-The script produces the visual representations of Fig. 17, 20, 34–36, and 68–72 of the paper (but adjusted to the newly downloaded data). The Motion Plausibility Profiles are separated into the main representation (```*.pdf```) and the respective histogram (```*-histogram.pdf```), i.e., in two separate files. Also, the script produces two versions of the main representation, one more squarish one (```*.pdf```) and one with a more landscape format (```*-wide.pdf```).
-
-
-# Interactive visualisation and automated trajectory plausibility analysis
-
-## General
-The automated trajectory plausibility analysis and interactive visualisation tool are an addition to the MPP article and project. This demo will accompagny a future article.
-
-## Requirements
-
-### Software requirements
-
-### Data requirements
-First, run the initial python script _inaturalist.py, the returned frequent-poster.log file will be used as a source for this second project.
-Move the frequent-poster.log file to data/processed/iNaturalist
-
-Then, download a second dataset of Gowalla Checkings at the following address: https://www.kaggle.com/datasets/bqlearner/gowalla-checkins/code
-Move the Gowalla_totalChecking.txt file to data/raw/diverse_datasets/
-
-## Additions related to my fork
-
-Run the complete canonical pipeline:
+The pipeline preprocesses raw data, generates features, trains several ML models, and evaluates them.
 
 ```bash
+# Preview the pipeline steps without running them
+python pipeline.py --dry-run
+
+# Run the complete canonical pipeline
 python pipeline.py
 ```
+*Note: Depending on the size of your datasets, the full pipeline can take some time.*
 
-## Running the interactive visualisation
-Once you ran the script (which can take some time depending on the size of your dataset), you can open the interactive visualisation of the dataset.
-```
+### 3. Start the Interactive Visualization
+
+Once the pipeline has successfully built the model predictions, you can launch the visualization server to explore the results interactively:
+
+```bash
+# Build the SQLite cache database for fast serving
 python build_database.py
+
+# Start the web visualization server
 python open_visualization.py
 ```
-Then you can open in your browser the following url :
-```
-http://127.0.0.1:8001
-```
 
-## Rebuilding the ML pipeline
+Open your browser at `http://127.0.0.1:8001` to view the map and analysis tools.
 
-Preview every stage without changing artifacts:
+## Documentation
 
-```bash
-python pipeline.py --dry-run
-```
+For a deeper dive into the architecture and concepts, please refer to our detailed documentation:
 
-Run the complete canonical pipeline:
+- [Machine Learning Pipeline](docs/ML_PIPELINE.md): Detailed explanation of preprocessing, model architectures, and evaluation.
+- [Interactive Visualization](docs/VISUALIZATION.md): Guide on how to use the web application and its features.
+- [Adding New Datasets](docs/ADDING_DATASETS.md): Learn how to use the `AbstractDatasetLoader` to plug your own data formats into the canonical schema.
+- [Architecture](ARCHITECTURE.md): The core structural design of this repository.
 
-```bash
-python pipeline.py
-```
-
-Run a named experiment from model training through the visualization database:
-
-```bash
-python pipeline.py --from-stage models --to-stage database \
-  --experiment-config modeling/configs/five_architecture_comparison.json \
-  --run-id 5arch_$(date +%Y%m%d_%H%M)
-```
-
-Train and index only selected models from that experiment:
-
-```bash
-python pipeline.py --from-stage models --to-stage database \
-  --experiment-config modeling/configs/five_architecture_comparison.json \
-  --run-id 5arch_$(date +%Y%m%d_%H%M) \
-  --models v5arch_lstm_ae_combined_e15 v5arch_t_lstm_combined_e15
-```
-
-Train and index the Frechet-kernel transition-vector model:
-
-```bash
-python pipeline.py --from-stage models --to-stage database \
-  --experiment-config modeling/configs/frechet_kernel_experiments.json \
-  --run-id frk_$(date +%Y%m%d_%H%M)
-```
-
-Keep earlier model runs visible while adding the Frechet run:
-
-```bash
-python pipeline.py --from-stage models --to-stage database \
-  --experiment-config modeling/configs/frechet_kernel_experiments.json \
-  --run-id frk_$(date +%Y%m%d_%H%M) \
-  --extra-artifact-source artifacts/models_5arch_20260622_1412=artifacts/predictions_5arch_20260622_1412
-```
-
-The visualization model panel lets you choose which feature-error columns are
-included in non-native transition reconstruction scores. Frechet-kernel models
-use their native trajectory dissimilarity score, with transition-level nearest
-landmark errors shown as explanations.
-
-Start the visualization against the same run:
-
-```bash
-python pipeline.py --from-stage database --to-stage database \
-  --experiment-config modeling/configs/five_architecture_comparison.json \
-  --model-root artifacts/models_5arch_YYYYMMDD_HHMM \
-  --prediction-root artifacts/predictions_5arch_YYYYMMDD_HHMM \
-  --serve
-```
-
-Resume from model training after preprocessing and feature generation:
-
-```bash
-python pipeline.py --from-stage models
-```
-
-Train only the T-LSTM experiment matrix:
-
-```bash
-python -m modeling.experiments modeling/configs/t_lstm_experiments.json
-```
-
-Train only the T-LSTM sequence-to-sequence matrix:
-
-```bash
-python -m modeling.experiments modeling/configs/t_lstm_seq2seq_experiments.json
-python build_database.py --comparison-group configurable_pipeline_v2
-```
-
-Train the jointly optimized paper-style LAGMM models:
-
-```bash
-python -m modeling.experiments modeling/configs/lagmm_experiments.json
-python build_database.py --comparison-group configurable_pipeline_v2
-```
-
-After regenerating synthetic anomalies, reevaluate every compatible current model
-without retraining:
-
-```bash
-python -m modeling.cli evaluate-all \
-  --datasets synthetic \
-  --feature-set motion_v2 \
-  --comparison-group configurable_pipeline_v2 \
-  --reference-datasets inat gowalla
-python build_database.py --comparison-group configurable_pipeline_v2
-```
-
-Run only preprocessing through feature generation:
-
-```bash
-python pipeline.py --to-stage features
-```
-
-The expensive model stage can be omitted with `--skip models`.
+## Original 2022 Project
+This project is an extension of the work by Tobias Isenberg et al. (2022). 
+The original files and README for that paper can be found in the `original_mpp/` folder.

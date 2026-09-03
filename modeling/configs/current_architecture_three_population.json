@@ -1,32 +1,33 @@
 {
   "base_config": null,
-  "reference_datasets": ["inat", "gowalla"],
+  "reference_datasets": [
+    "inat",
+    "gowalla"
+  ],
   "matrix": {
-    "model_id_prefix": "v6",
-    "comparison_group": "current_architecture_three_population",
+    "model_id_prefix": "v7_unified",
+    "comparison_group": "unified_evaluation",
     "epochs": 15,
-    "evaluation_datasets": ["inat", "gowalla", "synthetic"],
+    "evaluation_datasets": [
+      "inat",
+      "gowalla",
+      "synthetic"
+    ],
     "populations": [
       {
         "id": "combined",
-        "datasets": ["inat", "gowalla"],
-        "sampling_strategy": "all"
-      },
-      {
-        "id": "inat",
-        "datasets": ["inat"],
-        "sampling_strategy": "all"
-      },
-      {
-        "id": "gowalla",
-        "datasets": ["gowalla"],
+        "datasets": [
+          "inat",
+          "gowalla"
+        ],
         "sampling_strategy": "all"
       }
     ],
     "feature_combinations": [
       {
-        "id": "mpp_speed_accel_bearing_distance_time_speed",
+        "id": "all_motion_features",
         "features": [
+          "speed",
           "speed_stationary",
           "speed_0_5",
           "speed_5_10",
@@ -35,13 +36,12 @@
           "speed_80_140",
           "speed_140_200",
           "speed_200_plus",
-          "speed",
-          "acceleration",
-          "acceleration_valid",
           "elapsed_time",
           "distance",
-          "bearing_sin",
-          "bearing_cos",
+          "acceleration",
+          "acceleration_valid",
+          "bearing_region_sin",
+          "bearing_region_cos",
           "bearing_valid"
         ]
       }
@@ -76,7 +76,11 @@
           "hidden_dim": 128,
           "num_layers": 1,
           "latent_dim": 1,
-          "compression_dims": [64, 32, 16],
+          "compression_dims": [
+            64,
+            32,
+            16
+          ],
           "estimation_hidden_dim": 10,
           "estimation_dropout": 0.5,
           "representation": "one_dimensional_latent_relative_distance_cosine_similarity",
@@ -98,23 +102,6 @@
       {
         "id": "lstm_forecaster",
         "model_type": "lstm_forecaster",
-        "features": [
-          "speed_stationary",
-          "speed_0_5",
-          "speed_5_10",
-          "speed_10_25",
-          "speed_25_80",
-          "speed_80_140",
-          "speed_200_plus",
-          "speed",
-          "acceleration",
-          "acceleration_valid",
-          "bearing_sin",
-          "bearing_cos",
-          "bearing_valid",
-          "distance",
-          "elapsed_time"
-        ],
         "architecture": {
           "hidden_dim": 32,
           "num_layers": 2,
@@ -139,6 +126,39 @@
         },
         "training": {
           "max_trajectories": 5000
+        },
+        "evaluation": {
+          "max_trajectories": null,
+          "write_batch_size": 512
+        }
+      },
+      {
+        "id": "isolation_forest",
+        "model_type": "isolation_forest",
+        "architecture": {
+          "n_estimators": 100,
+          "contamination": "auto",
+          "max_samples": "auto"
+        },
+        "training": {
+          "max_trajectories": 10000
+        },
+        "evaluation": {
+          "max_trajectories": null,
+          "write_batch_size": 512
+        }
+      },
+      {
+        "id": "one_class_svm",
+        "model_type": "one_class_svm",
+        "architecture": {
+          "kernel": "rbf",
+          "nu": 0.05,
+          "gamma": "scale",
+          "max_train_samples": 10000
+        },
+        "training": {
+          "max_trajectories": 10000
         },
         "evaluation": {
           "max_trajectories": null,

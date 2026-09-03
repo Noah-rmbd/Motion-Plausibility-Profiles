@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from modeling.models.lstm_autoencoder import LSTMAutoencoderPlugin
-from modeling.registry import register_model
+from modeling.framework.registry import register_model
 
 
 class LSTMSeq2SeqAutoencoder(nn.Module):

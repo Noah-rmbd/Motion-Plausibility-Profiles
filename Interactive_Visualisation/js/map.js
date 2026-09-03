@@ -12,10 +12,24 @@ function clearSelectedTrajectoryLayers() {
     selectedTrajectoryLayers.forEach(layer => layer.remove());
     selectedTrajectoryLayers.clear();
     selectedTrajectoryIds.clear();
+    hiddenSelectedTrajectoryIds.clear();
+    selectedTrajectoryTimelineItems.clear();
+    renderTimeline();
 }
 
 function trajectoryIdKey(value) {
     return String(value);
+}
+
+function selectedTrajectoryKey(dataset, trajectoryId) {
+    return `${dataset}:${trajectoryIdKey(trajectoryId)}`;
+}
+
+function datasetShortLabel(dataset) {
+    if (dataset === 'inat') return 'iNat';
+    if (dataset === 'gowalla') return 'Gowalla';
+    if (dataset === 'synthetic') return 'Synth';
+    return dataset || '';
 }
 
 function clusterTrajectoryIds(cluster) {
@@ -25,8 +39,9 @@ function clusterTrajectoryIds(cluster) {
 }
 
 function clusterIsFullySelected(cluster) {
-    const ids = clusterTrajectoryIds(cluster);
-    return ids.length > 0 && ids.every(id => selectedTrajectoryIds.has(id));
+    const dataset = currentDatasetName();
+    const ids = clusterTrajectoryIds(cluster).map(id => selectedTrajectoryKey(dataset, id));
+    return ids.length > 0 && ids.every(key => selectedTrajectoryIds.has(key));
 }
 
 function ensureTrajectoryBubbleLayer() {
@@ -41,7 +56,10 @@ function clearTrajectoryBubbleLayer() {
     if (trajectoryBubbleLayer) {
         trajectoryBubbleLayer.clearLayers();
     }
-    expandedBubbleLayers.forEach(layer => layer.remove());
+    expandedBubbleLayers.forEach(item => {
+        const layer = item.layer || item;
+        if (layer && layer.remove) layer.remove();
+    });
     expandedBubbleLayers = [];
 }
 
@@ -75,10 +93,16 @@ function updateBubbleControls(payload = null, message = '') {
     } else if (payload) {
         const depth = expandedBubbleLayers.length;
         const depthLabel = depth > 0 ? ` Expanded bubbles ${depth}.` : '';
-        const thresholdLabel = payload.threshold !== null && payload.threshold !== undefined
-            ? ` Threshold ${formatModelScore(payload.threshold)}.`
-            : '';
-        status.textContent = `${payload.visible_points.toLocaleString()} visible trajectory barycentres, rendered as ${payload.clusters.length.toLocaleString()} bubbles/points.${thresholdLabel}${depthLabel}`;
+        const criterion = currentTrajectoryFilterCriterion();
+        const thresholdLabel = appliedTrajectoryScoreFilter
+            ? ` Score range ${formatModelScore(appliedTrajectoryScoreFilter.score_min)}-${formatModelScore(appliedTrajectoryScoreFilter.score_max)}.`
+            : payload.threshold !== null && payload.threshold !== undefined
+                ? ` Threshold ${formatModelScore(payload.threshold)}.`
+                : '';
+        const filterLabel = criterion === 'flight'
+            ? `${payload.visible_points.toLocaleString()} plausible flight-speed (>200 km/h) trajectories, rendered as ${payload.clusters.length.toLocaleString()} bubbles/points.`
+            : `${payload.visible_points.toLocaleString()} visible trajectory barycentres, rendered as ${payload.clusters.length.toLocaleString()} bubbles/points.`;
+        status.textContent = `${filterLabel}${thresholdLabel}${depthLabel}`;
     } else {
         status.textContent = 'Choose a trajectory filter to render bubbles.';
     }
@@ -88,6 +112,7 @@ function trajectoryBubbleTooltip(cluster) {
     if (cluster.count > 1) {
         let content = `<b>${cluster.count.toLocaleString()} trajectories</b><br>${cluster.trajectory_ids ? 'Click to show these trajectories.' : 'Click to expand this bubble.'}`;
         if (cluster.score_summary) {
+            content += `<br><b>Avg reconstruction error:</b> ${formatModelScore(cluster.score_summary.mean)}`;
             content += `<br><b>Score range:</b> ${formatModelScore(cluster.score_summary.min)} - ${formatModelScore(cluster.score_summary.max)}`;
         }
         return content;
@@ -131,7 +156,10 @@ function canonicalTransitionTooltip(transition, transitionScore = null, trajecto
     const acceleration = Number(transition.acceleration_m_s2 ?? transition.acceleration);
     const bearing = Number(transition.bearing_change_rad ?? transition.bearing_change);
     const baselineUnplausible = transition.transition_plausibility === 0;
-    let transInfo = `<b>Trajectory:</b> ${transition.trajectory_id}<br><b>Transition:</b> ${transition.transition_id}`;
+    const dataset = transition.dataset || '';
+    let transInfo = dataset
+        ? `<b>Dataset:</b> ${datasetShortLabel(dataset)}<br><b>Trajectory:</b> ${transition.trajectory_id}<br><b>Transition:</b> ${transition.transition_id}`
+        : `<b>Trajectory:</b> ${transition.trajectory_id}<br><b>Transition:</b> ${transition.transition_id}`;
     if (Number.isFinite(speed)) transInfo += `<br><b>Speed:</b> ${speed.toFixed(2)} km/h`;
     if (Number.isFinite(distance)) transInfo += `<br><b>Distance:</b> ${distance.toFixed(2)} m`;
     if (Number.isFinite(elapsed)) transInfo += `<br><b>Elapsed Time:</b> ${elapsed.toFixed(0)} s`;
@@ -141,7 +169,7 @@ function canonicalTransitionTooltip(transition, transitionScore = null, trajecto
     if (baselineUnplausible && transition.plausibility_reason) {
         transInfo += `<br><b>Baseline reason:</b> ${transition.plausibility_reason}`;
     }
-    const modelScore = transitionScore?.selected_score ?? transitionScore?.reconstruction_error ?? transitionScore?.mse;
+    const modelScore = transitionScore?.selected_score ?? transitionScore?.reconstruction_error ?? transitionScore?.mse ?? transitionScore?.score;
     if (modelScore !== undefined) {
         transInfo += `<br><b>Transition score:</b> ${formatModelScore(modelScore)}`;
     }
@@ -177,9 +205,14 @@ function selectedObservationIcon() {
 }
 
 function renderSelectedTrajectoryPayload(payload) {
+    const dataset = payload.dataset || currentDatasetName();
     const observations = observationLookupFromPayload(payload);
     const transitionScores = transitionScoreLookupFromPayload(payload);
     const trajectoryScores = trajectoryScoreLookupFromPayload(payload);
+    const trajectoryMetadata = {};
+    (payload.trajectories || []).forEach(trajectory => {
+        trajectoryMetadata[trajectoryIdKey(trajectory.trajectory_id)] = trajectory;
+    });
     const byTrajectory = {};
     (payload.transitions || []).forEach(transition => {
         byTrajectory[transition.trajectory_id] ||= [];
@@ -188,7 +221,8 @@ function renderSelectedTrajectoryPayload(payload) {
     const bounds = L.latLngBounds();
     Object.entries(byTrajectory).forEach(([trajectoryId, transitions], index) => {
         const id = trajectoryIdKey(trajectoryId);
-        if (selectedTrajectoryLayers.has(id)) return;
+        const key = selectedTrajectoryKey(dataset, id);
+        if (selectedTrajectoryLayers.has(key)) return;
         const trajectoryLayer = L.layerGroup().addTo(leafletMap);
         const addedObservationIds = new Set();
         const circleIcon = selectedObservationIcon();
@@ -207,14 +241,30 @@ function renderSelectedTrajectoryPayload(payload) {
                 });
                 const transitionScore = transitionScores[String(transition.transition_id)];
                 const trajectoryScore = trajectoryScores[id];
+                transition.dataset = dataset;
                 const speed = Number(transition.speed_kmh ?? transition.speed);
                 const color = getSpeedColor(Number.isFinite(speed) ? `${speed} km/h` : '0 km/h');
-                const baselineUnplausible = transition.transition_plausibility === 0;
+                const baselineUnplausible = transition.transition_plausibility === 0 || transition.transition_plausibility === '0' || transition.baseline_unplausible === true || transition.is_unplausible === true;
+
+                if (baselineUnplausible) {
+                    // Create a multi-layered radial vanishing gradient (halo fading to transparent)
+                    [20, 14, 9].forEach((w, idx) => {
+                        L.polyline([[first.lat, first.lon], [second.lat, second.lon]], {
+                            color: '#ffff00',
+                            weight: w,
+                            opacity: 0.15 * (idx + 1),
+                            dashArray: null,
+                            interactive: false,
+                            className: 'unplausible-line-blurred'
+                        }).addTo(trajectoryLayer);
+                    });
+                }
                 const polyline = L.polyline([[first.lat, first.lon], [second.lat, second.lon]], {
-                    color: baselineUnplausible ? '#ff4d4f' : color,
-                    weight: baselineUnplausible ? 6 : 4,
+                    color: baselineUnplausible ? '#000000' : color,
+                    weight: baselineUnplausible ? 8 : 4,
                     opacity: 0.9,
-                    dashArray: baselineUnplausible ? '5, 5' : null
+                    dashArray: baselineUnplausible ? '5, 15' : null,
+                    className: baselineUnplausible ? 'unplausible-line-blurred' : ''
                 }).addTo(trajectoryLayer);
                 const tooltip = canonicalTransitionTooltip(transition, transitionScore, trajectoryScore);
                 polyline.bindTooltip(tooltip, { sticky: true });
@@ -228,7 +278,7 @@ function renderSelectedTrajectoryPayload(payload) {
                     html: `
                         <div style="width: 20px; height: 20px; transform: rotate(${angle}deg);">
                             <svg viewBox="0 0 24 24" width="20" height="20" style="overflow: visible;">
-                                <polygon points="4,4 20,12 4,20" fill="${baselineUnplausible ? '#ff4d4f' : color}" stroke="white" stroke-width="2" />
+                                <polygon points="4,4 20,12 4,20" fill="${baselineUnplausible ? '#ffff00' : color}" stroke="${baselineUnplausible ? 'black' : 'white'}" stroke-width="2" />
                             </svg>
                         </div>
                     `,
@@ -241,8 +291,22 @@ function renderSelectedTrajectoryPayload(payload) {
                 bounds.extend([second.lat, second.lon]);
             });
         if (trajectoryLayer.getLayers().length > 0) {
-            selectedTrajectoryLayers.set(id, trajectoryLayer);
-            selectedTrajectoryIds.add(id);
+            selectedTrajectoryLayers.set(key, trajectoryLayer);
+            selectedTrajectoryIds.add(key);
+            hiddenSelectedTrajectoryIds.delete(key);
+            const trajectory = trajectoryMetadata[id] || {};
+            selectedTrajectoryTimelineItems.set(key, {
+                key,
+                dataset,
+                trajectory_id: id,
+                user_id: trajectory.user_id || transitions[0]?.user_id || '',
+                date: trajectory.date || (trajectory.start_timestamp || '').slice(0, 10).replace(/-/g, '/'),
+                n_transitions: trajectory.n_transitions ?? transitions.length,
+                model_score: trajectoryScores[id]?.selected_score
+                    ?? trajectoryScores[id]?.model_score
+                    ?? trajectoryScores[id]?.score
+                    ?? trajectory.model_score
+            });
         } else {
             trajectoryLayer.remove();
         }
@@ -250,13 +314,51 @@ function renderSelectedTrajectoryPayload(payload) {
     if (bounds.isValid()) {
         leafletMap.fitBounds(bounds, { padding: [50, 50] });
     }
+    renderTimeline();
+}
+
+function showSelectedTrajectoryLayer(trajectoryKey) {
+    const key = String(trajectoryKey);
+    const layer = selectedTrajectoryLayers.get(key);
+    if (!layer || !leafletMap) return false;
+    if (!leafletMap.hasLayer(layer)) layer.addTo(leafletMap);
+    selectedTrajectoryIds.add(key);
+    hiddenSelectedTrajectoryIds.delete(key);
+    renderTimeline();
+    return true;
+}
+
+function hideSelectedTrajectoryLayer(trajectoryKey) {
+    const key = String(trajectoryKey);
+    const layer = selectedTrajectoryLayers.get(key);
+    if (!layer || !leafletMap) return false;
+    if (leafletMap.hasLayer(layer)) layer.remove();
+    selectedTrajectoryIds.delete(key);
+    hiddenSelectedTrajectoryIds.add(key);
+    renderTimeline();
+    updateBubbleControls(null, `Showing ${selectedTrajectoryIds.size.toLocaleString()} selected trajectories.`);
+    return true;
+}
+
+function toggleSelectedTrajectoryLayer(trajectoryKey) {
+    const key = String(trajectoryKey);
+    if (selectedTrajectoryIds.has(key)) {
+        return hideSelectedTrajectoryLayer(key);
+    }
+    return showSelectedTrajectoryLayer(key);
 }
 
 async function showClusterTrajectories(cluster, marker = null) {
+    const dataset = currentDatasetName();
     const ids = clusterTrajectoryIds(cluster);
-    const newIds = ids.filter(id => !selectedTrajectoryIds.has(id));
+    ids
+        .map(id => selectedTrajectoryKey(dataset, id))
+        .filter(key => selectedTrajectoryLayers.has(key) && !selectedTrajectoryIds.has(key))
+        .forEach(showSelectedTrajectoryLayer);
+    const newIds = ids.filter(id => !selectedTrajectoryLayers.has(selectedTrajectoryKey(dataset, id)));
     if (newIds.length === 0) {
         if (marker) marker.remove();
+        renderTimeline();
         return true;
     }
     const params = new URLSearchParams({
@@ -301,9 +403,11 @@ function currentTrajectoryFilterCriterion() {
 function currentTrajectoryBubbleParams() {
     const criterion = currentTrajectoryFilterCriterion();
     const params = {};
-    if (criterion === 'none') {
-        return { params };
-    } else if (criterion === 'user') {
+    const modelSettings = currentScoreFilterSettings();
+    if (modelSettings) {
+        Object.assign(params, modelSettings);
+    }
+    if (criterion === 'user') {
         const selectedUser = document.getElementById('user-select')?.value || currentUser || '';
         if (!selectedUser) {
             return {
@@ -318,6 +422,15 @@ function currentTrajectoryBubbleParams() {
             };
         }
         Object.assign(params, appliedTrajectoryScoreFilter);
+    } else if (criterion === 'flight') {
+        params.min_transition_speed = '200';
+        params.exclude_unplausible = 'true';
+    } else if (criterion === 'none') {
+        // No extra filtering: query trajectory bubbles for the whole dataset
+    } else {
+        return {
+            error: 'Choose a trajectory filter to render bubbles.'
+        };
     }
     return { params };
 }
@@ -348,6 +461,12 @@ async function renderTrajectoryBubbles(options = {}) {
     Object.entries(filter.params).forEach(([key, value]) => {
         params.set(key, String(value));
     });
+    const activeOpenedIds = [...selectedTrajectoryIds]
+        .filter(key => key.startsWith(`${currentDatasetName()}:`))
+        .map(key => key.split(':')[1]);
+    if (activeOpenedIds.length > 0) {
+        params.set('exclude_trajectory_ids', activeOpenedIds.join(','));
+    }
     const requestKey = params.toString();
     latestBubbleRequestKey = requestKey;
 
@@ -363,8 +482,25 @@ async function renderTrajectoryBubbles(options = {}) {
             return;
         }
 
-        expandedBubbleLayers.forEach(expandedLayer => expandedLayer.remove());
-        expandedBubbleLayers = [];
+        if (!options.preserveExpanded) {
+            expandedBubbleLayers.forEach(item => {
+                const layer = item.layer || item;
+                if (layer && layer.remove) layer.remove();
+            });
+            expandedBubbleLayers = [];
+        } else {
+            const remaining = [];
+            expandedBubbleLayers.forEach(item => {
+                const parentZoom = item.parentZoom;
+                const layer = item.layer || item;
+                if (parentZoom !== undefined && clusterZoom <= parentZoom) {
+                    if (layer && layer.remove) layer.remove();
+                } else {
+                    remaining.push(item);
+                }
+            });
+            expandedBubbleLayers = remaining;
+        }
         layer.clearLayers();
         renderClusterMarkers(payload.clusters, layer, clusterZoom);
         updateBubbleControls(payload);
@@ -376,18 +512,61 @@ async function renderTrajectoryBubbles(options = {}) {
 }
 
 function renderClusterMarkers(clusters, layer, clusterZoom) {
+    let minScore = Infinity;
+    let maxScore = -Infinity;
+    clusters.forEach(cluster => {
+        const val = cluster.score_summary ? cluster.score_summary.mean : cluster.model_score;
+        if (val !== undefined && val !== null && Number.isFinite(val)) {
+            if (val < minScore) minScore = val;
+            if (val > maxScore) maxScore = val;
+        }
+    });
+    const hasScoreRange = Number.isFinite(minScore) && Number.isFinite(maxScore) && maxScore > minScore;
+
     clusters.forEach(cluster => {
         if (clusterIsFullySelected(cluster)) return;
         const isBubble = cluster.count > 1;
         const size = isBubble ? bubbleSize(cluster.count) : 13;
-        const icon = L.divIcon({
-            className: '',
-            html: isBubble
-                ? `<div class="trajectory-bubble-marker" style="width:${size}px;height:${size}px;font-size:${Math.max(11, Math.min(16, size / 4))}px;">${formatBubbleCount(cluster.count)}</div>`
-                : '<div class="trajectory-point-marker"></div>',
-            iconSize: [size, size],
-            iconAnchor: [size / 2, size / 2]
-        });
+        const isBaselineImpossible = cluster.baseline_unplausible === true || cluster.is_unplausible === true;
+        const isModelUnplausible = cluster.model_unplausible === true;
+        let icon;
+        if (isBubble) {
+            let colorStyle = '';
+            if (hasScoreRange && cluster.score_summary && Number.isFinite(cluster.score_summary.mean)) {
+                const t = Math.max(0, Math.min(1, (cluster.score_summary.mean - minScore) / (maxScore - minScore)));
+                const hue = Math.round((1 - t) * 120); // 120 = Green (lowest error), 0 = Red (highest error)
+                colorStyle = `background: hsl(${hue}, 78%, 42%); color: #ffffff; border: 2px solid #ffffff; shadow: 0 2px 8px rgba(0,0,0,0.4);`;
+            }
+            icon = L.divIcon({
+                className: '',
+                html: `<div class="trajectory-bubble-marker" style="width:${size}px;height:${size}px;font-size:${Math.max(11, Math.min(16, size / 4))}px;${colorStyle}">${formatBubbleCount(cluster.count)}</div>`,
+                iconSize: [size, size],
+                iconAnchor: [size / 2, size / 2]
+            });
+        } else if (isBaselineImpossible) {
+            icon = L.icon({
+                iconUrl: 'ressources/impossible_circle_icon.png',
+                iconSize: [20, 20],
+                iconAnchor: [10, 10],
+                popupAnchor: [0, -10]
+            });
+        } else {
+            let pointStyle = '';
+            if (isModelUnplausible) {
+                pointStyle = 'background: #dc2626; border-color: #ffffff;';
+            } else if (hasScoreRange && Number.isFinite(cluster.model_score)) {
+                const t = Math.max(0, Math.min(1, (cluster.model_score - minScore) / (maxScore - minScore)));
+                const hue = Math.round((1 - t) * 120);
+                pointStyle = `background: hsl(${hue}, 78%, 42%);`;
+            }
+            icon = L.divIcon({
+                className: '',
+                html: `<div class="trajectory-point-marker" style="${pointStyle}"></div>`,
+                iconSize: [size, size],
+                iconAnchor: [size / 2, size / 2]
+            });
+        }
+
         const marker = L.marker([cluster.lat, cluster.lon], { icon }).addTo(layer);
         marker.bindTooltip(trajectoryBubbleTooltip(cluster), { sticky: true });
         marker.on('click', async event => {
@@ -418,6 +597,12 @@ async function expandBubble(cluster, marker, currentClusterZoom) {
     Object.entries(filter.params).forEach(([key, value]) => {
         params.set(key, String(value));
     });
+    const activeOpenedIds = [...selectedTrajectoryIds]
+        .filter(key => key.startsWith(`${currentDatasetName()}:`))
+        .map(key => key.split(':')[1]);
+    if (activeOpenedIds.length > 0) {
+        params.set('exclude_trajectory_ids', activeOpenedIds.join(','));
+    }
     try {
         const response = await fetch(`/api/trajectory_bubbles?${params.toString()}`);
         const payload = await response.json();
@@ -427,7 +612,11 @@ async function expandBubble(cluster, marker, currentClusterZoom) {
         }
         if (marker) marker.remove();
         const layer = L.layerGroup().addTo(leafletMap);
-        expandedBubbleLayers.push(layer);
+        expandedBubbleLayers.push({
+            layer: layer,
+            parentZoom: currentClusterZoom,
+            expandedZoom: nextZoom
+        });
         renderClusterMarkers(payload.clusters, layer, nextZoom);
         updateBubbleControls(null, `Expanded ${cluster.count.toLocaleString()} trajectories into ${payload.clusters.length.toLocaleString()} bubbles/points.`);
     } catch (error) {
@@ -436,14 +625,18 @@ async function expandBubble(cluster, marker, currentClusterZoom) {
 }
 
 function resetTrajectoryBubbles() {
-    expandedBubbleLayers.forEach(layer => layer.remove());
+    expandedBubbleLayers.forEach(item => {
+        const layer = item.layer || item;
+        if (layer && layer.remove) layer.remove();
+    });
     expandedBubbleLayers = [];
     updateBubbleControls();
 }
 
 function stepBackTrajectoryBubble() {
-    const layer = expandedBubbleLayers.pop();
-    if (layer) layer.remove();
+    const item = expandedBubbleLayers.pop();
+    const layer = item ? (item.layer || item) : null;
+    if (layer && layer.remove) layer.remove();
     updateBubbleControls();
 }
 
@@ -467,9 +660,10 @@ function updateScoreFilterControls(message = '') {
     const status = document.getElementById('score-filter-status');
     const applyButton = document.getElementById('apply-score-filter');
     const hasModel = Boolean(currentModelSelection);
-    if (applyButton) applyButton.disabled = !hasModel || !scoreDistributionPayload;
+    if (applyButton) applyButton.disabled = !hasModel || !scoreDistributionPayload || modelConfigurationDirty;
     if (status) {
-        status.textContent = message || (hasModel ? '' : 'No model selected.');
+        status.textContent = message
+            || (modelConfigurationDirty ? 'Save model to update score filtering.' : hasModel ? '' : 'No model selected.');
     }
 }
 
@@ -499,12 +693,13 @@ function renderScoreDistributionSelection() {
 function setScoreRangeControlBounds(payload) {
     const min = Number(payload.min);
     const max = Number(payload.max);
-    const step = Math.max((max - min) / 1000, 0.0001);
+    const span = Math.max(max - min, 0.0001);
+    const step = Math.max(span / 1000, 0.0001);
     ['score-range-min', 'score-range-max', 'score-range-min-slider', 'score-range-max-slider'].forEach(id => {
         const input = document.getElementById(id);
         if (!input) return;
         input.min = String(min);
-        input.max = String(max);
+        input.max = String(min + span);
         input.step = String(step);
     });
 }
@@ -515,14 +710,13 @@ function setScoreRangeValues(minValue, maxValue) {
     let lower = Math.max(min, Math.min(max, Number(minValue)));
     let upper = Math.max(min, Math.min(max, Number(maxValue)));
     if (lower > upper) {
-        const midpoint = (lower + upper) / 2;
-        lower = midpoint;
-        upper = midpoint;
+        [lower, upper] = [upper, lower];
     }
     document.getElementById('score-range-min').value = lower.toFixed(6);
     document.getElementById('score-range-max').value = upper.toFixed(6);
     document.getElementById('score-range-min-slider').value = String(lower);
     document.getElementById('score-range-max-slider').value = String(upper);
+    scoreRangeSelection = { min: lower, max: upper };
     renderScoreDistributionSelection();
 }
 
@@ -578,7 +772,7 @@ function updateSelectedScoreRangeSummary(prefix = '') {
         return;
     }
     const lead = prefix ? `${prefix} ` : '';
-    status.textContent = `${lead}${estimate.count.toLocaleString()} trajectories in range (${estimate.percentage.toFixed(1)}% of the dataset).`;
+    status.textContent = `${lead}${estimate.count.toLocaleString()} trajectories in range (${estimate.percentage.toFixed(1)}% of iNaturalist + Gowalla).`;
 }
 
 function drawScoreDistribution(payload) {
@@ -604,6 +798,19 @@ function drawScoreDistribution(payload) {
     }, { responsive: true, displayModeBar: false });
 }
 
+function restoreScoreDistributionView() {
+    if (!scoreDistributionPayload || !window.Plotly) return;
+    drawScoreDistribution(scoreDistributionPayload);
+    if (scoreRangeSelection) {
+        setScoreRangeValues(scoreRangeSelection.min, scoreRangeSelection.max);
+    } else {
+        renderScoreDistributionSelection();
+    }
+    setTimeout(() => {
+        Plotly.Plots.resize('score-distribution-plot');
+    }, 0);
+}
+
 async function loadScoreDistribution() {
     const settings = currentScoreFilterSettings();
     if (!settings) {
@@ -612,11 +819,14 @@ async function loadScoreDistribution() {
     }
     updateScoreFilterControls('Loading score distribution...');
     const params = new URLSearchParams({
-        dataset: currentDatasetName(),
+        dataset: 'combined_real',
         ...settings
     });
     const requestKey = params.toString();
     latestScoreDistributionRequestKey = requestKey;
+    const previousRange = scoreDistributionSettingsKey === requestKey
+        ? scoreRangeSelection
+        : null;
     try {
         const response = await fetch(`/api/trajectory_score_distribution?${params.toString()}`);
         const payload = await response.json();
@@ -627,26 +837,40 @@ async function loadScoreDistribution() {
             return;
         }
         scoreDistributionPayload = payload;
-        const lower = Number.isFinite(payload.threshold) ? payload.threshold : payload.min;
+        scoreDistributionSettingsKey = requestKey;
+        const lower = previousRange
+            ? previousRange.min
+            : Number.isFinite(payload.threshold)
+                ? payload.threshold
+                : payload.min;
+        const upper = previousRange ? previousRange.max : payload.max;
         setScoreRangeControlBounds(payload);
         drawScoreDistribution(payload);
-        setScoreRangeValues(Number(lower), Number(payload.max));
+        setScoreRangeValues(Number(lower), Number(upper));
+        updateScoreFilterControls();
         updateSelectedScoreRangeSummary(`${payload.count.toLocaleString()} scored trajectories loaded.`);
     } catch (error) {
         if (latestScoreDistributionRequestKey !== requestKey) return;
         scoreDistributionPayload = null;
+        scoreDistributionSettingsKey = '';
         updateScoreFilterControls(error.message || 'Could not load score distribution.');
     }
 }
 
 function scheduleScoreDistributionRefresh() {
     if (scoreDistributionTimer) clearTimeout(scoreDistributionTimer);
+    if (modelConfigurationDirty) {
+        updateScoreFilterControls('Save model to update score filtering.');
+        return;
+    }
     if (currentTrajectoryFilterCriterion() !== 'score') {
         updateScoreFilterControls();
         return;
     }
     if (!currentModelSelection) {
         scoreDistributionPayload = null;
+        scoreDistributionSettingsKey = '';
+        scoreRangeSelection = null;
         appliedTrajectoryScoreFilter = null;
         updateScoreFilterControls('No model selected.');
         return;
@@ -686,7 +910,8 @@ function syncTrajectoryFilterControls() {
     if (userControls) userControls.hidden = criterion !== 'user';
     if (scoreControls) scoreControls.hidden = criterion !== 'score';
     if (userSelect) userSelect.disabled = criterion !== 'user';
-    if (timeline) timeline.hidden = criterion !== 'user';
+    if (timeline) timeline.hidden = false;
+    renderTimeline();
     updateScoreFilterControls();
 }
 
@@ -695,7 +920,6 @@ function refreshTrajectoryBubblesForFilter({ resetDrill = true, clearRoute = tru
     if (resetDrill) {
         expandedBubbleLayers.forEach(layer => layer.remove());
         expandedBubbleLayers = [];
-        clearSelectedTrajectoryLayers();
     }
     if (clearRoute) clearRouteMapLayers();
     renderTrajectoryBubbles();
@@ -838,16 +1062,32 @@ async function updateMapForDate(user_id, dates) {
 
             let color = getSpeedColor(t.speed + " km/h");
 
-            const isUnplausible = t.is_unplausible === true;
+            const isUnplausible = t.is_unplausible === true || t.baseline_unplausible === true || t.transition_plausibility === 0 || t.transition_plausibility === '0';
             const isReviewedPlausible = t.reviewed_plausible === true;
+
+            if (isUnplausible) {
+                // Create a multi-layered radial vanishing gradient (halo fading to transparent)
+                [20, 14, 9].forEach((w, idx) => {
+                    L.polyline([[p1.lat, p1.lon], [p2.lat, p2.lon]], {
+                        color: '#ffff00',
+                        weight: w,
+                        opacity: 0.15 * (idx + 1),
+                        dashArray: null,
+                        interactive: false,
+                        className: 'unplausible-line-blurred'
+                    }).addTo(leafletMap);
+                });
+            }
+
             const polyline = L.polyline([[p1.lat, p1.lon], [p2.lat, p2.lon]], {
-                color: isUnplausible ? '#ff4d4f' : (isReviewedPlausible ? '#00a676' : color),
-                weight: isUnplausible || isReviewedPlausible ? 6 : 4,
+                color: isUnplausible ? '#000000' : (isReviewedPlausible ? '#00a676' : color),
+                weight: isUnplausible || isReviewedPlausible ? 8 : 4,
                 opacity: 0.9,
-                dashArray: isUnplausible ? '5, 5' : (isReviewedPlausible ? '1, 8' : null)
+                dashArray: isUnplausible ? '5, 15' : (isReviewedPlausible ? '1, 8' : null),
+                className: isUnplausible ? 'unplausible-line-blurred' : ''
             }).addTo(leafletMap);
 
-            let transInfo = `<b>Speed:</b> ${parseFloat(t.speed).toFixed(2)} km/h<br><b>Distance:</b> ${parseFloat(t.distance).toFixed(2)} m<br><b>Elapsed Time:</b> ${parseFloat(t.elapsed_time).toFixed(0)} s<br><b>Plausibility:</b> ${parseFloat(t.transition_plausibility).toFixed(0)}`;
+            let transInfo = `<b>Trajectory:</b> ${t.trajectory_id}<br><b>Transition:</b> ${t.transition_id}<br><b>Speed:</b> ${parseFloat(t.speed).toFixed(2)} km/h<br><b>Distance:</b> ${parseFloat(t.distance).toFixed(2)} m<br><b>Elapsed Time:</b> ${parseFloat(t.elapsed_time).toFixed(0)} s<br><b>Plausibility:</b> ${parseFloat(t.transition_plausibility).toFixed(0)}`;
             if (t.acceleration !== undefined) {
                 transInfo += `<br><b>Acceleration:</b> ${parseFloat(t.acceleration).toFixed(4)} m/s²`;
             }
@@ -859,14 +1099,14 @@ async function updateMapForDate(user_id, dates) {
                 transInfo += `<br><b>Baseline reason:</b> ${t.plausibility_reason}`;
             }
             transInfo += `<br><b>Reviewed plausible:</b> ${t.reviewed_plausible ? '<span style="color:#00a676; font-weight:bold;">Yes</span>' : 'No'}`;
-            if (t.reconstruction_error !== undefined) {
+            if (t.reconstruction_error !== undefined || t.model_score !== undefined) {
                 transInfo += `<br><b>Model anomaly:</b> ${t.model_unplausible ? '<span style="color:red; font-weight:bold;">Yes (highest-error transition)</span>' : 'No'}`;
-                transInfo += `<br><b>LSTM Error:</b> ${parseFloat(t.reconstruction_error).toFixed(4)}`;
-                if (t.reconstruction_feature_errors && t.reconstruction_error > 0) {
+                transInfo += `<br><b>Transition score:</b> ${formatModelScore(t.model_score ?? t.reconstruction_error)}`;
+                if (t.reconstruction_feature_errors && Object.keys(t.reconstruction_feature_errors).length > 0) {
                     const fErr = t.reconstruction_feature_errors;
-                    transInfo += `<br><b>Feature Errors:</b>`;
+                    transInfo += `<br><b>Feature-wise scores:</b>`;
                     Object.entries(fErr).forEach(([name, value]) => {
-                        transInfo += `<br>&nbsp;&nbsp;${profileDisplayName(name)}: ${parseFloat(value).toFixed(4)}`;
+                        transInfo += `<br>&nbsp;&nbsp;${profileDisplayName(name)}: ${formatModelScore(value)}`;
                     });
                 }
             }

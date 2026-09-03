@@ -259,18 +259,7 @@ def import_models(
                 feature_dataset_dir / "trajectories.parquet",
                 feature_dataset_dir / "transition_features.parquet",
             ]
-            if (
-                dataset == "synthetic"
-                and any(
-                    path.exists()
-                    and path.stat().st_mtime > score_path.stat().st_mtime
-                    for path in feature_paths
-                )
-            ):
-                print(
-                    f"Skipping stale synthetic predictions: {model_id}"
-                )
-                continue
+
             score_frame = pd.read_parquet(score_path)
             transition_frame = pd.read_parquet(
                 score_path.with_name("transition_scores.parquet")
@@ -291,6 +280,13 @@ def import_models(
                 / dataset
                 / "trajectories.parquet"
             )
+            if not calibration_path.exists():
+                calibration_path = (
+                    Path(feature_root)
+                    / "motion_v2"
+                    / dataset
+                    / "trajectories.parquet"
+                )
             calibration_ids = None
             if calibration_path.exists() and dataset != "synthetic":
                 calibration_frame = pd.read_parquet(
@@ -384,6 +380,14 @@ def build_database(
         with experiment_path.open("r", encoding="utf-8") as handle:
             experiment = json.load(handle)
         indexed_model_ids = [run["model_id"] for run in expanded_runs(experiment)]
+        for config_path in Path(model_root).glob("*/config.json"):
+            try:
+                with config_path.open("r", encoding="utf-8") as handle:
+                    cfg = json.load(handle)
+                if cfg.get("model_type", "").startswith("global_clustering"):
+                    indexed_model_ids.append(config_path.parent.name)
+            except Exception:
+                pass
     if selected_model_ids:
         if indexed_model_ids is None:
             indexed_model_ids = sorted(selected_model_ids)
@@ -452,15 +456,15 @@ def main():
     parser.add_argument("--feature-root", default="data/features")
     parser.add_argument(
         "--comparison-group",
-        default="configurable_pipeline_v3",
+        default=None,
         help="Only index models from this experiment group. Use an empty value for all.",
     )
     parser.add_argument(
         "--experiment-config",
-        default="modeling/configs/configurable_model_matrix.json",
+        default=None,
         help=(
             "Only index model IDs expanded from this experiment config. "
-            "Use an empty value to index every artifact matching --comparison-group."
+            "Leave default/empty to index all available model artifacts."
         ),
     )
     parser.add_argument(
@@ -479,6 +483,9 @@ def main():
         default=["inat", "gowalla", "synthetic"],
     )
     args = parser.parse_args()
+    if args.comparison_group is None and args.experiment_config:
+        from pipeline import infer_comparison_group
+        args.comparison_group = infer_comparison_group(args.experiment_config)
     build_database(
         db_path=args.db_path,
         processed_root=args.processed_root,
